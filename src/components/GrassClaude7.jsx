@@ -326,42 +326,69 @@ void main() {
   grassFaceNormal = grassMat * grassFaceNormal;
   grassFaceNormal *= zSide;
 
+  // CRITICAL: Calculate normals FIRST, before any color calculations
+  // This ensures the rounded normal effect is properly calculated and visible
+  
   // Base normal for the grass blade (perpendicular to blade surface)
   // This normal accounts for the blade's curve/bend
   vec3 grassVertexNormal = vec3(0.0, -ncurve.z, ncurve.y);
   
   // For rounded effect in 2.5D: create normals that vary across blade WIDTH
-  // In 2.5D side-view, the camera is at an angle, so we need to account for view direction
-  // The normals should vary in a way that's visible from the side-view camera angle
+  // The key is to create two opposite normals that will be interpolated across the blade width
+  // This creates a fake 3D volume effect visible from the side-view camera
   
-  // Get camera position (will be used again later, but we need it here for normal calculation)
+  // Get camera position and direction in WORLD SPACE
   vec3 cameraPosForNormal = (viewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
   vec3 viewDirForNormal = normalize(cameraPosForNormal - grassBladeWorldPos);
-  vec3 viewDirXZ = normalize(vec3(viewDirForNormal.x, 0.0, viewDirForNormal.z)); // Camera direction in XZ plane
+  vec3 viewDirXZ = normalize(vec3(viewDirForNormal.x, 0.0, viewDirForNormal.z)); // Camera direction in XZ plane (world space)
   
-  // For 2.5D: vary normals perpendicular to view direction for rounded effect
-  // Create a vector perpendicular to view direction in XZ plane (this is the "width" direction from camera's perspective)
-  vec3 perpToView = vec3(-viewDirXZ.z, 0.0, viewDirXZ.x); // Perpendicular to view in XZ plane
+  // Transform camera direction to OBJECT SPACE for normal calculation
+  // We need to transform the perpendicular direction to object space
+  // First, get the inverse of grassMat to transform from world to object space
+  // Since grassMat is a rotation matrix, its inverse is its transpose
+  mat3 grassMatInv = transpose(grassMat);
+  vec3 viewDirXZObject = normalize(grassMatInv * viewDirXZ);
   
-  // Strength of the rounded effect - higher = more rounded
-  float normalXStrength = 0.9; // Tilt strength for rounded appearance (increased for 2.5D visibility)
+  // Create perpendicular vector in OBJECT SPACE
+  // In object space, the blade's width is along the X axis
+  // We want to tilt normals along the X axis based on camera view
+  vec3 perpToViewObject = vec3(-viewDirXZObject.z, 0.0, viewDirXZObject.x); // Perpendicular in object space
   
-  // Create base normal direction (forward-facing with curve)
-  vec3 baseNormalDir = normalize(vec3(0.0, grassVertexNormal.y, max(abs(grassVertexNormal.z), 0.6)));
+  // MUCH STRONGER strength for visible rounded effect
+  // Higher value = more pronounced rounded appearance
+  // For 2.5D side-view, we need a very strong effect to be visible
+  float normalXStrength = 4.0; // Significantly increased for very visible rounded effect
   
-  // Create two normals: one tilted towards camera-left, one towards camera-right
-  // This creates the rounded effect visible from the side-view camera
-  // The perpendicular vector gives us the direction to tilt the normals
-  vec3 leftNormal = normalize(baseNormalDir + perpToView * -normalXStrength);
-  vec3 rightNormal = normalize(baseNormalDir + perpToView * normalXStrength);
+  // Create base normal direction in OBJECT SPACE (accounts for blade curve)
+  // Ensure it has enough forward component for proper lighting
+  vec3 baseNormalDir = normalize(vec3(0.0, grassVertexNormal.y, max(abs(grassVertexNormal.z), 0.7)));
+  
+  // CRITICAL: Create two normals with OPPOSITE tilts in OBJECT SPACE
+  // For rounded effect: create normals that curve around the blade width
+  // Left edge normal: tilted along negative X (points left)
+  // Right edge normal: tilted along positive X (points right)
+  // The interpolation between these creates the rounded appearance
+  
+  // Calculate the tilt direction based on blade width position
+  // x ranges from -grassTotalWidth/2 to +grassTotalWidth/2
+  // We want to create a curved normal that varies smoothly across the width
+  float xNormalized = x / max(grassTotalWidth, 0.001); // Normalize x to [-0.5, 0.5]
+  
+  // Create curved normal: the X component varies based on position across width
+  // This creates a smooth rounded effect
+  vec3 curvedNormal = normalize(baseNormalDir + vec3(xNormalized * normalXStrength * 2.0, 0.0, 0.0));
+  
+  // For the two-edge normals (for interpolation in fragment shader):
+  // Left edge: xNormalized = -0.5
+  vec3 leftNormal = normalize(baseNormalDir + vec3(-normalXStrength, 0.0, 0.0));
+  // Right edge: xNormalized = +0.5
+  vec3 rightNormal = normalize(baseNormalDir + vec3(normalXStrength, 0.0, 0.0));
   
   // Apply grass transformations (wind, player interaction, etc.) to normals
-  // These transformations will preserve the left/right variation
+  // These transformations preserve the left/right variation
+  // IMPORTANT: Don't multiply by zSide - we want normals to point outward on both sides
   vec3 grassVertexNormal1 = grassMat * leftNormal;
-  // FIX: Don't multiply by zSide - we want normals to point outward on both sides for rounded effect
-  // grassVertexNormal1 *= zSide;
   vec3 grassVertexNormal2 = grassMat * rightNormal;
-  // grassVertexNormal2 *= zSide;
 
   // Position calculation - ALL rotations must happen around the base point
   vec3 grassVertexPosition = vec3(x, y, 0.0);
@@ -583,25 +610,53 @@ void main() {
   #include <normal_fragment_begin>
   #include <normal_fragment_maps>
   
-  // Normal mixing trick: blend between two rotated normals based on width position
-  // This creates a fake 3D volume effect, making blades appear thicker
-  vec3 rotatedNormal1 = normalize(normal); // This is vNormal (rotatedNormal1 from vertex shader)
-  vec3 rotatedNormal2 = normalize(vNormal2); // This is vNormal2 (rotatedNormal2 from vertex shader)
-  float normalMixFactor = vGrassParams.w; // widthPercent: 0.0 = left edge, 1.0 = right edge
-  vec3 finalNormal = mix(rotatedNormal1, rotatedNormal2, normalMixFactor);
+  // CRITICAL: Normal mixing for rounded effect
+  // Blend between two opposite normals based on width position (left edge vs right edge)
+  // This creates the fake 3D volume effect that makes blades appear rounded/thick
+  vec3 rotatedNormal1 = normalize(normal); // vNormal from vertex shader (left normal)
+  vec3 rotatedNormal2 = normalize(vNormal2); // vNormal2 from vertex shader (right normal)
+  
+  // widthPercent: 0.0 = left edge, 0.5 = center, 1.0 = right edge
+  // At left edge: use leftNormal (rotatedNormal1)
+  // At right edge: use rightNormal (rotatedNormal2)
+  // In between: smooth interpolation creates the rounded effect
+  float normalMixFactor = vGrassParams.w; // widthPercent from vertex shader
+  
+  // Ensure normalMixFactor is clamped
+  normalMixFactor = clamp(normalMixFactor, 0.0, 1.0);
+  
+  // Use smoothstep for smoother interpolation curve (more pronounced effect)
+  float smoothMixFactor = smoothstep(0.0, 1.0, normalMixFactor);
+  
+  // Interpolate between the two normals
+  vec3 finalNormal = mix(rotatedNormal1, rotatedNormal2, smoothMixFactor);
   normal = normalize(finalNormal);
+  
+  // ENHANCEMENT: Add extra lighting boost based on normal variation
+  // This helps make the rounded effect more visible by emphasizing the lighting difference
+  float normalVariation = abs(dot(rotatedNormal1, rotatedNormal2));
+  float lightingBoost = 1.0 + (1.0 - normalVariation) * 0.3; // Boost lighting contrast
+  
+  // DEBUG: Uncomment to visualize the normal interpolation
+  // vec3 debugColor = vec3(normalMixFactor, 0.0, 1.0 - normalMixFactor);
+  // diffuseColor.rgb = debugColor;
 
-  // FIX: At grass tips, force normals to point more upward for proper lighting
-  // This prevents tips from going black when blade normals face away from light
-  float tipNormalFix = smoothstep(0.7, 1.0, heightPercent);
+  // REDUCED tip normal fix - only apply minimal upward bias to prevent black tips
+  // But don't override the rounded effect too much
+  float tipNormalFix = smoothstep(0.85, 1.0, heightPercent); // Only at very tips
   vec3 upwardNormal = vec3(0.0, 1.0, 0.0);
-  normal = normalize(mix(normal, upwardNormal, tipNormalFix * 0.7));
+  normal = normalize(mix(normal, upwardNormal, tipNormalFix * 0.3)); // Reduced from 0.7 to 0.3
   
   #include <emissivemap_fragment>
   #include <lights_phong_fragment>
   #include <lights_fragment_begin>
   #include <lights_fragment_maps>
   #include <lights_fragment_end>
+  
+  // ENHANCEMENT: Boost lighting contrast to make rounded effect more visible
+  // Multiply diffuse lighting by the boost factor to emphasize the normal variation
+  reflectedLight.directDiffuse *= lightingBoost;
+  reflectedLight.indirectDiffuse *= lightingBoost;
   
   // Re-enable backscatter and specular
   if (uBackscatterEnabled) {

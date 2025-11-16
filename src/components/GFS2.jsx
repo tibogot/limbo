@@ -2,7 +2,7 @@ import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
-const GRASS_BLADES = 4096; // 64x64 = 4,096 blades (cranked up from 32x32 = 1,024)
+const GRASS_BLADES = 9216; // 96x96 = 9,216 blades (increased from 64x64 = 4,096 for denser grass)
 const GRASS_SEGMENTS = 6; // Number of segments in the blade
 const GRASS_VERTICES = (GRASS_SEGMENTS + 1) * 2; // Vertices per blade (front and back)
 const GRASS_PATCH_SIZE = 10;
@@ -190,9 +190,9 @@ void main() {
   
   // Color gradient from base to tip - matches tutorial exactly
   // I just picked 2 colours, darker green and a yellowish colour.
-  // Adjusted to more natural hues - base is rich dark green, tip is vibrant lime-yellow
-  vec3 baseColour = vec3(0.08, 0.35, 0.02); // Rich dark green base
-  vec3 tipColour = vec3(0.7, 0.85, 0.25); // Natural lime-yellow-green tip (more green in yellow)
+  // Lighter green color matching #59b01c (RGB: 89, 176, 28)
+  vec3 baseColour = vec3(0.349, 0.690, 0.110); // Lighter green base color #59b01c
+  vec3 tipColour = vec3(0.733, 0.831, 0.475); // Tip color #bbd479 (RGB: 187, 212, 121)
   
   // Do a gradient from base to tip, controlled by shaping function.
   vec3 diffuseColour = mix(baseColour, tipColour, easeIn(heightPercent, 4.0));
@@ -311,9 +311,9 @@ void main() {
   
   // Lighting to show rounded 3D effect from normal blending
   // Normals are rotated BEFORE other transformations (done in vertex shader)
-  float ambient = 0.85; // Higher ambient to brighten colors (was 0.6)
-  float diffuse = NdotL * 0.8; // Diffuse for rounded effect
-  float ambientLighting = ambient + diffuse; // Range: 0.85 to 1.65 (brighter overall)
+  float ambient = 1.0; // Very high ambient to match tutorial's bright appearance (was 0.85)
+  float diffuse = NdotL * 1.0; // Full diffuse for rounded effect (was 0.8)
+  float ambientLighting = ambient + diffuse; // Range: 1.0 to 2.0 (very bright overall)
   
   // Ambient occlusion based on density and height
   // Density is in the range [0, 1]
@@ -394,8 +394,8 @@ export default function Grass({
 
     // Create offset positions for each grass blade
     const offsets = [];
-    const NUM_GRASS_X = 64;
-    const NUM_GRASS_Y = 64;
+    const NUM_GRASS_X = 96;
+    const NUM_GRASS_Y = 96;
 
     for (let i = 0; i < NUM_GRASS_X; ++i) {
       const x = (i / NUM_GRASS_X) * GRASS_PATCH_SIZE - GRASS_PATCH_SIZE * 0.5;
