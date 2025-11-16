@@ -2,7 +2,7 @@ import { useKeyboardControls } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
 import { CapsuleCollider, RigidBody, useRapier } from "@react-three/rapier";
 import { useControls } from "leva";
-import { useRef, useState } from "react";
+import { useRef, useState, useMemo } from "react";
 import { MathUtils } from "three";
 import { Character } from "./Character";
 
@@ -32,10 +32,10 @@ export const CharacterController = ({
   enableOrbitControls = false,
   playerPositionRef,
   setPlayerPosition,
+  terrainHeightFunction,
 }) => {
-  const { WALK_SPEED, RUN_SPEED, ROTATION_SPEED, JUMP_FORCE } = useControls(
-    "Character Control",
-    {
+  const { WALK_SPEED, RUN_SPEED, ROTATION_SPEED, JUMP_FORCE, CHARACTER_SCALE } =
+    useControls("Character Control", {
       WALK_SPEED: { value: 0.8, min: 0.1, max: 4, step: 0.1 },
       RUN_SPEED: { value: 1.6, min: 0.2, max: 12, step: 0.1 },
       ROTATION_SPEED: {
@@ -45,8 +45,14 @@ export const CharacterController = ({
         step: MathUtils.degToRad(0.1),
       },
       JUMP_FORCE: { value: 5, min: 1, max: 15, step: 0.5, label: "Jump Force" },
-    }
-  );
+      CHARACTER_SCALE: {
+        value: 0.2,
+        min: 0.1,
+        max: 2,
+        step: 0.01,
+        label: "Character Scale",
+      },
+    });
 
   const {
     cameraOffsetX,
@@ -277,12 +283,20 @@ export const CharacterController = ({
 
   // Spawn higher for procedural terrain to ensure visibility
   // For side-scroller, spawn on ground level, avoiding street lamps at x=-20,-10,0,10,20
-  const spawnPosition =
-    mapType === "procedural"
+  // For hilly terrain, use BVH to get correct spawn height
+  const spawnPosition = useMemo(() => {
+    if (mapType === "hillysidescroller" && terrainHeightFunction) {
+      const spawnX = -5;
+      const spawnZ = 0;
+      const terrainHeight = terrainHeightFunction(spawnX, 0, spawnZ);
+      return [spawnX, terrainHeight + 1, spawnZ]; // Spawn 1 unit above terrain
+    }
+    return mapType === "procedural"
       ? [0, 10, 0]
-      : mapType === "sidescroller" || mapType === "hillysidescroller"
+      : mapType === "sidescroller"
       ? [-5, 1, 0] // Spawn at x=-5 to avoid lamp at x=0
       : [0, 0, 0];
+  }, [mapType, terrainHeightFunction]);
 
   return (
     <RigidBody
@@ -300,7 +314,11 @@ export const CharacterController = ({
     >
       <group ref={container}>
         <group ref={character}>
-          <Character scale={0.18} position-y={-0.25} animation={animation} />
+          <Character
+            scale={CHARACTER_SCALE}
+            position-y={-0.25}
+            animation={animation}
+          />
         </group>
       </group>
       <CapsuleCollider

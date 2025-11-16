@@ -63,6 +63,7 @@ export const Experience = () => {
   const [terrainReady, setTerrainReady] = useState(false);
   const playerPositionRef = useRef([0, 0, 0]);
   const [playerPosition, setPlayerPosition] = useState([0, 0, 0]);
+  const terrainHeightFunctionRef = useRef(null);
   const { map } = useControls("Map", {
     map: {
       value: "castle_on_hills",
@@ -103,17 +104,17 @@ export const Experience = () => {
       label: "Fog Height",
     },
     fogNear: {
-      value: 1,
+      value: 0,
       min: 0,
       max: 100,
       step: 1,
       label: "Fog Near",
     },
     fogFar: {
-      value: 200,
-      min: 100,
+      value: 50,
+      min: 10,
       max: 5000,
-      step: 50,
+      step: 5,
       label: "Fog Far",
     },
   });
@@ -268,6 +269,9 @@ export const Experience = () => {
             position={maps[map].position}
             playerPosition={playerPosition}
             grassControls={grassControls}
+            onTerrainReady={(heightFn) => {
+              terrainHeightFunctionRef.current = heightFn;
+            }}
           />
         ) : (
           <Map
@@ -282,6 +286,7 @@ export const Experience = () => {
             enableOrbitControls={enableOrbitControls}
             playerPositionRef={playerPositionRef}
             setPlayerPosition={setPlayerPosition}
+            terrainHeightFunction={terrainHeightFunctionRef.current}
           />
         )}
       </Physics>

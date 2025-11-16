@@ -202,12 +202,25 @@ void main() {
 
   vec3 grassOffset = vec3(position.x, 0.0, position.y);
   vec3 grassBladeWorldPos = (modelMatrix * vec4(grassOffset, 1.0)).xyz;
+  // heightParams: x=terrainSize, y=terrainCenterZ (mesh Z offset), z=unused, w=unused
+  // Terrain is PlaneGeometry rotated -90° around X, positioned at [0, 0, terrainCenterZ]
+  // PlaneGeometry: X and Y are plane dimensions, Z is height
+  // After rotation: Plane X → World X, Plane Y → World -Z, Plane Z → World Y
+  // After position: World X = Plane X, World Y = Plane Z, World Z = -Plane Y + terrainCenterZ
+  // So: Plane X = World X, Plane Y = -(World Z - terrainCenterZ) = terrainCenterZ - World Z
+  // Heightmap texture: U maps to Plane X, V maps to Plane Y
+  float terrainCenterZ = heightParams.y;
+  float halfSize = heightParams.x * 0.5;
+  float planeX = grassBladeWorldPos.x;
+  float planeY = terrainCenterZ - grassBladeWorldPos.z;
   vec2 heightmapUV = vec2(
-    remap(grassBladeWorldPos.x, -heightParams.x * 0.5, heightParams.x * 0.5, 0.0, 1.0),
-    remap(grassBladeWorldPos.z, -heightParams.x * 0.5, heightParams.x * 0.5, 1.0, 0.0)
+    remap(planeX, -halfSize, halfSize, 0.0, 1.0),
+    remap(planeY, -halfSize, halfSize, 1.0, 0.0)  // Inverted because texture V goes top to bottom
   );
   vec4 heightmapSample = texture2D(heightmap, heightmapUV);
-  grassBladeWorldPos.y += heightmapSample.x * grassParams.z - grassParams.w;
+  // grassParams.z = terrainHeight, grassParams.w = terrainOffset (Z offset, not Y offset)
+  // Only apply height from heightmap, don't subtract terrainOffset from Y
+  grassBladeWorldPos.y += heightmapSample.x * grassParams.z;
   float heightmapSampleHeight = 1.0;
 
   vec4 hashVal1 = hash42(vec2(grassBladeWorldPos.x, grassBladeWorldPos.z));
@@ -240,10 +253,16 @@ void main() {
   float grassTotalHeight = grassSize.y * randomHeight;
   float grassTotalWidthHigh = easeOut(1.0 - heightPercent, 2.0);
   float grassTotalWidthLow = 1.0 - heightPercent;
-  float grassTotalWidth = grassSize.x * mix(grassTotalWidthHigh, grassTotalWidthLow, highLODOut) * randomWidth;
+  // For 2.5D: increase blade width significantly for better visibility from side view
+  float widthMultiplier = 3.0; // Make blades 3x wider for 2.5D side-view (was too thin)
+  float grassTotalWidth = grassSize.x * mix(grassTotalWidthHigh, grassTotalWidthLow, highLODOut) * randomWidth * widthMultiplier;
 
   float x = (xSide - 0.5) * grassTotalWidth;
   float y = heightPercent * grassTotalHeight;
+  
+  // Calculate widthPercent for normal interpolation (0.0 = left edge, 1.0 = right edge)
+  // This creates the rounded look by interpolating between the two opposite normals
+  float widthPercent = (x / grassTotalWidth) + 0.5; // Normalize x from [-width/2, width/2] to [0, 1]
 
   float windLeanAngle = 0.0;
   vec3 windAxis = vec3(1.0, 0.0, 0.0);
@@ -282,7 +301,21 @@ void main() {
   vec3 ncurve = normalize(n1 - n2);
 
   // Build rotation matrices separately - we'll apply them around the base point
-  mat3 randomRotMat = rotateY(randomAngle);
+  // For 2.5D side-view: orient blades to face camera better for thickness
+  // Get camera direction early to orient blades towards it
+  vec3 cameraPosEarly = (viewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  vec3 viewDirEarly = normalize(cameraPosEarly - grassBladeWorldPos);
+  vec3 viewDirXZEarly = normalize(vec3(viewDirEarly.x, 0.0, viewDirEarly.z));
+  
+  // Calculate angle to face camera (in XZ plane)
+  // Atan2 gives us the angle from positive Z axis towards the camera
+  float angleToCamera = atan(viewDirXZEarly.x, viewDirXZEarly.z);
+  
+  // For 2.5D: blend between random rotation and camera-facing rotation
+  // This makes blades face camera more while still having some variation
+  float cameraFacingBlend = 0.7; // 70% towards camera, 30% random
+  float adjustedRandomAngle = mix(randomAngle * 0.2, angleToCamera, cameraFacingBlend);
+  mat3 randomRotMat = rotateY(adjustedRandomAngle);
   mat3 windRotMat = rotateAxis(windAxis, windLeanAngle);
   mat3 playerRotMat = rotateAxis(playerLeanAxis, playerLeanAngle);
   
@@ -293,19 +326,42 @@ void main() {
   grassFaceNormal = grassMat * grassFaceNormal;
   grassFaceNormal *= zSide;
 
-  // Base normal for the grass blade
+  // Base normal for the grass blade (perpendicular to blade surface)
+  // This normal accounts for the blade's curve/bend
   vec3 grassVertexNormal = vec3(0.0, -ncurve.z, ncurve.y);
   
-  // Calculate two rotated normals by rotating slightly on the Y axis (before other transformations)
-  // This creates the fake 3D volume effect by varying normals across the blade width
-  vec3 rotatedNormal1 = rotateY(PI * 0.3) * grassVertexNormal;
-  vec3 rotatedNormal2 = rotateY(PI * -0.3) * grassVertexNormal;
+  // For rounded effect in 2.5D: create normals that vary across blade WIDTH
+  // In 2.5D side-view, the camera is at an angle, so we need to account for view direction
+  // The normals should vary in a way that's visible from the side-view camera angle
+  
+  // Get camera position (will be used again later, but we need it here for normal calculation)
+  vec3 cameraPosForNormal = (viewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  vec3 viewDirForNormal = normalize(cameraPosForNormal - grassBladeWorldPos);
+  vec3 viewDirXZ = normalize(vec3(viewDirForNormal.x, 0.0, viewDirForNormal.z)); // Camera direction in XZ plane
+  
+  // For 2.5D: vary normals perpendicular to view direction for rounded effect
+  // Create a vector perpendicular to view direction in XZ plane (this is the "width" direction from camera's perspective)
+  vec3 perpToView = vec3(-viewDirXZ.z, 0.0, viewDirXZ.x); // Perpendicular to view in XZ plane
+  
+  // Strength of the rounded effect - higher = more rounded
+  float normalXStrength = 0.9; // Tilt strength for rounded appearance (increased for 2.5D visibility)
+  
+  // Create base normal direction (forward-facing with curve)
+  vec3 baseNormalDir = normalize(vec3(0.0, grassVertexNormal.y, max(abs(grassVertexNormal.z), 0.6)));
+  
+  // Create two normals: one tilted towards camera-left, one towards camera-right
+  // This creates the rounded effect visible from the side-view camera
+  // The perpendicular vector gives us the direction to tilt the normals
+  vec3 leftNormal = normalize(baseNormalDir + perpToView * -normalXStrength);
+  vec3 rightNormal = normalize(baseNormalDir + perpToView * normalXStrength);
   
   // Apply grass transformations (wind, player interaction, etc.) to normals
-  vec3 grassVertexNormal1 = grassMat * rotatedNormal1;
-  grassVertexNormal1 *= zSide;
-  vec3 grassVertexNormal2 = grassMat * rotatedNormal2;
-  grassVertexNormal2 *= zSide;
+  // These transformations will preserve the left/right variation
+  vec3 grassVertexNormal1 = grassMat * leftNormal;
+  // FIX: Don't multiply by zSide - we want normals to point outward on both sides for rounded effect
+  // grassVertexNormal1 *= zSide;
+  vec3 grassVertexNormal2 = grassMat * rightNormal;
+  // grassVertexNormal2 *= zSide;
 
   // Position calculation - ALL rotations must happen around the base point
   vec3 grassVertexPosition = vec3(x, y, 0.0);
@@ -331,14 +387,37 @@ void main() {
   vec3 t2 = uTipColor2;
   vec3 baseColour = mix(b1, b2, hashGrassColour.x);
   vec3 tipColour = mix(t1, t2, hashGrassColour.y);
-  float gradientFactor = easeIn(heightPercent, uGradientCurve);
+  
+  // Ensure tips always get tip color - clamp heightPercent at tips to ensure full tip color
+  float tipHeightPercent = clamp(heightPercent, 0.0, 1.0);
+  
+  float gradientFactor = easeIn(tipHeightPercent, uGradientCurve);
   gradientFactor = mix(0.0, gradientFactor, uGradientBlend);
-  vec3 highLODColour = mix(baseColour, tipColour, gradientFactor) * randomShade;
-  float lowLODGradient = mix(0.0, heightPercent, uGradientBlend);
-  vec3 lowLODColour = mix(b1, t1, lowLODGradient);
+
+  // CRITICAL FIX: Force tips (heightPercent > 0.9) to be 100% tip color
+  // This prevents any base color from bleeding through at the tips
+  gradientFactor = mix(gradientFactor, 1.0, smoothstep(0.9, 1.0, tipHeightPercent));
+
+  // Fix for black tips: ensure tips are always bright regardless of randomShade
+  // At the very tips (heightPercent > 0.9), force full brightness
+  // Below tips, allow normal shade variation
+  float tipBrightnessBoost = smoothstep(0.7, 1.0, tipHeightPercent); // 0.0 at base, 1.0 at tips
+  float minShade = mix(0.6, 1.0, tipBrightnessBoost); // At tips: minShade=1.0, at base: minShade=0.6
+  float adjustedShade = max(minShade, randomShade); // Use max instead of mix to ensure tips are bright
+
+  vec3 highLODColour = mix(baseColour, tipColour, gradientFactor) * adjustedShade;
+
+  // CRITICAL: Low LOD must also force tips to be tip color (same fix as high LOD)
+  float lowLODGradient = mix(0.0, tipHeightPercent, uGradientBlend);
+  lowLODGradient = mix(lowLODGradient, 1.0, smoothstep(0.9, 1.0, tipHeightPercent));
+  vec3 lowLODColour = mix(baseColour, tipColour, lowLODGradient) * adjustedShade;
+
   vGrassColour = mix(highLODColour, lowLODColour, highLODOut);
-  // Calculate widthPercent: normalized position across blade width (0.0 = left edge, 1.0 = right edge)
-  float widthPercent = xSide; // xSide is 0.0 or 1.0, representing left/right side
+
+  // ULTIMATE FIX: Override color at very tips to ALWAYS be pure tip color
+  float tipColorOverride = smoothstep(0.9, 1.0, heightPercent);
+  vGrassColour = mix(vGrassColour, tipColour, tipColorOverride);
+  // widthPercent is already calculated above for normal interpolation
   vGrassParams = vec4(heightPercent, grassBladeWorldPos.y, highLODOut, widthPercent);
 
   const float SKY_RATIO = 0.25;
@@ -352,9 +431,9 @@ void main() {
 
   vec3 cameraWorldLeft = (viewMatrixInverse * vec4(-1.0, 0.0, 0.0, 0.0)).xyz;
   // Get camera position from viewMatrixInverse (more reliable than cameraPosition uniform)
-  vec3 cameraPos = (viewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-  vec3 viewDir = normalize(cameraPos - grassBladeWorldPos);
-  vec3 viewDirXZ = normalize(vec3(viewDir.x, 0.0, viewDir.z));
+  // Reuse the camera position and view direction already calculated above for normal calculation
+  vec3 viewDir = normalize(cameraPosForNormal - grassBladeWorldPos);
+  // viewDirXZ is already calculated above, reuse it here
   vec3 grassFaceNormalXZ = normalize(vec3(grassFaceNormal.x, 0.0, grassFaceNormal.z));
   float viewDotNormal = clamp(dot(grassFaceNormalXZ, viewDirXZ), 0.0, 1.0);
   float viewSpaceThickenFactor = easeOut(1.0 - viewDotNormal, 4.0) * smoothstep(0.0, 0.2, viewDotNormal);
@@ -468,20 +547,25 @@ void main() {
   #include <clipping_planes_fragment>
   
   vec4 diffuseColor = vec4(vGrassColour, 1.0);
+  vec3 originalGrassColor = vGrassColour; // Store original color before any modifications
   float heightPercent = vGrassParams.x;
   float height = vGrassParams.y;
   float lodFadeIn = vGrassParams.z;
   float lodFadeOut = 1.0 - lodFadeIn;
-  
-  float grassMiddle = mix(smoothstep(abs(vGrassParams.w - 0.5), 0.0, 0.1), 1.0, lodFadeIn);
+
+  // Re-enable fragment effects now that we've fixed normals
+  float grassMiddle = mix(smoothstep(0.0, 0.5, abs(vGrassParams.w - 0.5)), 1.0, lodFadeIn);
   float isSandy = clamp(linearstep(-11.0, -14.0, height), 0.0, 1.0);
   float density = 1.0 - isSandy;
   diffuseColor.rgb *= mix(0.85, 1.0, grassMiddle);
-  
+
   if (uAoEnabled) {
     float aoForDensity = mix(1.0, 0.25, density);
-    float ao = mix(aoForDensity, 1.0, pow(heightPercent, 2.0));
-    diffuseColor.rgb *= ao * uAoIntensity;
+    // Don't darken tips with AO
+    float ao = mix(aoForDensity, 1.0, pow(heightPercent, 1.5));
+    float aoTipBoost = smoothstep(0.8, 1.0, heightPercent);
+    ao = mix(ao * uAoIntensity, 1.0, aoTipBoost);
+    diffuseColor.rgb *= ao;
   }
   
   #include <logdepthbuf_fragment>
@@ -506,6 +590,12 @@ void main() {
   float normalMixFactor = vGrassParams.w; // widthPercent: 0.0 = left edge, 1.0 = right edge
   vec3 finalNormal = mix(rotatedNormal1, rotatedNormal2, normalMixFactor);
   normal = normalize(finalNormal);
+
+  // FIX: At grass tips, force normals to point more upward for proper lighting
+  // This prevents tips from going black when blade normals face away from light
+  float tipNormalFix = smoothstep(0.7, 1.0, heightPercent);
+  vec3 upwardNormal = vec3(0.0, 1.0, 0.0);
+  normal = normalize(mix(normal, upwardNormal, tipNormalFix * 0.7));
   
   #include <emissivemap_fragment>
   #include <lights_phong_fragment>
@@ -513,6 +603,7 @@ void main() {
   #include <lights_fragment_maps>
   #include <lights_fragment_end>
   
+  // Re-enable backscatter and specular
   if (uBackscatterEnabled) {
     vec3 viewDir = normalize(-vViewPosition);
     vec3 lightDir = normalize(vec3(1.0, 1.0, 0.5));
@@ -529,7 +620,7 @@ void main() {
     vec3 backscatterContribution = backscatterColor * totalSSS * uBackscatterIntensity;
     reflectedLight.directDiffuse += backscatterContribution;
   }
-  
+
   if (uSpecularEnabled) {
     vec3 viewDir = normalize(-vViewPosition);
     vec3 lightDir = normalize(uLightDirection);
@@ -538,12 +629,17 @@ void main() {
     spec *= uSpecularScale;
     reflectedLight.directSpecular += uSpecularColor * spec * uSpecularIntensity;
   }
-  
+
   vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + reflectedLight.directSpecular + totalEmissiveRadiance;
-  
+
+  // FIX: At tips, add minimum ambient light to prevent complete darkness
+  float tipUnlit = smoothstep(0.8, 1.0, heightPercent);
+  vec3 unlitTipColor = originalGrassColor * 1.2; // Boost tip brightness
+  outgoingLight = mix(outgoingLight, max(outgoingLight, unlitTipColor), tipUnlit);
+
   #include <envmap_fragment>
   
-  // OPTIMIZED: Simple RGB fog (no OKLAB conversion for better performance)
+  // Re-enable fog
   if (uFogEnabled) {
     float fogFactor = clamp((vFogDepth - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
     fogFactor *= uFogIntensity;
@@ -666,7 +762,7 @@ export function GrassPatch({
   terrainSize = 100,
   playerPosition = null,
   castShadow = false,
-  receiveShadow = true,
+  receiveShadow = false,
   fogEnabled = true,
   fogNear = 5.0,
   fogFar = 50.0,
@@ -707,8 +803,9 @@ export function GrassPatch({
   playerInteractionStrength = 0.2,
   meshRef: externalMeshRef = null,
 }) {
-  const materialRef = useRef();
   const lodMeshRefs = useRef(LOD_CONFIGS.map(() => React.createRef()));
+  const activeLODIndexRef = useRef(0);
+  const [activeLODIndex, setActiveLODIndex] = React.useState(0);
   const { camera } = useThree();
 
   // Color refs
@@ -732,105 +829,107 @@ export function GrassPatch({
     );
   }, [patchSize, grassHeight]);
 
-  // SHARED material - one instance for all LOD levels
-  const material = useMemo(
-    () =>
-      new THREE.MeshPhongMaterial({
-        side: THREE.FrontSide,
-        alphaTest: 0.5,
-        transparent: false,
-        fog: false,
-      }),
-    []
-  );
+  // Create separate materials for each LOD level
+  const lodMaterials = useMemo(() => {
+    return LOD_CONFIGS.map(
+      () =>
+        new THREE.MeshPhongMaterial({
+          side: THREE.FrontSide,
+          alphaTest: 0.5,
+          transparent: false,
+          fog: false,
+        })
+    );
+  }, []);
 
-  // Setup shader ONCE
+  // Setup shader for each LOD material
   useEffect(() => {
-    if (!materialRef.current) return;
+    lodMaterials.forEach((mat, index) => {
+      if (!mat) return;
 
-    const mat = materialRef.current;
+      mat.onBeforeCompile = (shader) => {
+        // Add custom uniforms
+        shader.uniforms.time = { value: 0 };
+        shader.uniforms.grassSize = {
+          value: new THREE.Vector2(grassWidth, grassHeight),
+        };
+        shader.uniforms.grassParams = {
+          value: new THREE.Vector4(6, 14, terrainHeight, terrainOffset),
+        }; // Will update per LOD
+        shader.uniforms.grassDraw = { value: new THREE.Vector4(15, 80, 0, 0) };
+        shader.uniforms.heightmap = { value: heightmap };
+        shader.uniforms.heightParams = {
+          value: new THREE.Vector4(terrainSize, terrainOffset || 0, 0, 0),
+        };
+        shader.uniforms.playerPos = { value: new THREE.Vector3(0, 0, 0) };
+        shader.uniforms.viewMatrixInverse = { value: new THREE.Matrix4() };
 
-    mat.onBeforeCompile = (shader) => {
-      // Add custom uniforms
-      shader.uniforms.time = { value: 0 };
-      shader.uniforms.grassSize = {
-        value: new THREE.Vector2(grassWidth, grassHeight),
-      };
-      shader.uniforms.grassParams = {
-        value: new THREE.Vector4(6, 14, terrainHeight, terrainOffset),
-      }; // Will update per LOD
-      shader.uniforms.grassDraw = { value: new THREE.Vector4(15, 80, 0, 0) };
-      shader.uniforms.heightmap = { value: heightmap };
-      shader.uniforms.heightParams = {
-        value: new THREE.Vector4(terrainSize, 0, 0, 0),
-      };
-      shader.uniforms.playerPos = { value: new THREE.Vector3(0, 0, 0) };
-      shader.uniforms.viewMatrixInverse = { value: new THREE.Matrix4() };
+        // Static uniforms (updated only when props change)
+        shader.uniforms.uFogEnabled = { value: fogEnabled };
+        shader.uniforms.uFogNear = { value: fogNear };
+        shader.uniforms.uFogFar = { value: fogFar };
+        shader.uniforms.uFogColor = { value: fogColorRef.current };
+        shader.uniforms.uFogIntensity = { value: fogIntensity };
+        shader.uniforms.uBaseColor1 = { value: baseColor1Ref.current };
+        shader.uniforms.uBaseColor2 = { value: baseColor2Ref.current };
+        shader.uniforms.uTipColor1 = { value: tipColor1Ref.current };
+        shader.uniforms.uTipColor2 = { value: tipColor2Ref.current };
+        shader.uniforms.uGradientBlend = { value: gradientBlend };
+        shader.uniforms.uGradientCurve = { value: gradientCurve };
+        shader.uniforms.uWindEnabled = { value: windEnabled };
+        shader.uniforms.uWindStrength = { value: windStrength };
+        shader.uniforms.uWindDirectionScale = { value: windDirectionScale };
+        shader.uniforms.uWindDirectionSpeed = { value: windDirectionSpeed };
+        shader.uniforms.uWindStrengthScale = { value: windStrengthScale };
+        shader.uniforms.uWindStrengthSpeed = { value: windStrengthSpeed };
+        shader.uniforms.uPlayerInteractionEnabled = {
+          value: playerInteractionEnabled,
+        };
+        shader.uniforms.uPlayerInteractionRange = {
+          value: playerInteractionRange,
+        };
+        shader.uniforms.uPlayerInteractionStrength = {
+          value: playerInteractionStrength,
+        };
+        shader.uniforms.uNormalMixEnabled = { value: normalMixEnabled };
+        shader.uniforms.uNormalMixFactor = { value: normalMixFactor };
+        shader.uniforms.uBackscatterEnabled = { value: backscatterEnabled };
+        shader.uniforms.uBackscatterIntensity = { value: backscatterIntensity };
+        shader.uniforms.uBackscatterColor = {
+          value: backscatterColorRef.current,
+        };
+        shader.uniforms.uBackscatterPower = { value: backscatterPower };
+        shader.uniforms.uFrontScatterStrength = { value: frontScatterStrength };
+        shader.uniforms.uRimSSSStrength = { value: rimSSSStrength };
+        shader.uniforms.uSpecularEnabled = { value: specularEnabled };
+        shader.uniforms.uSpecularIntensity = { value: specularIntensity };
+        shader.uniforms.uSpecularColor = { value: specularColorRef.current };
+        shader.uniforms.uSpecularPower = { value: specularPower };
+        shader.uniforms.uSpecularScale = { value: specularScale };
+        shader.uniforms.uLightDirection = {
+          value: new THREE.Vector3(
+            lightDirectionX,
+            lightDirectionY,
+            lightDirectionZ
+          ),
+        };
+        shader.uniforms.uAoEnabled = { value: aoEnabled };
+        shader.uniforms.uAoIntensity = { value: aoIntensity };
 
-      // Static uniforms (updated only when props change)
-      shader.uniforms.uFogEnabled = { value: fogEnabled };
-      shader.uniforms.uFogNear = { value: fogNear };
-      shader.uniforms.uFogFar = { value: fogFar };
-      shader.uniforms.uFogColor = { value: fogColorRef.current };
-      shader.uniforms.uFogIntensity = { value: fogIntensity };
-      shader.uniforms.uBaseColor1 = { value: baseColor1Ref.current };
-      shader.uniforms.uBaseColor2 = { value: baseColor2Ref.current };
-      shader.uniforms.uTipColor1 = { value: tipColor1Ref.current };
-      shader.uniforms.uTipColor2 = { value: tipColor2Ref.current };
-      shader.uniforms.uGradientBlend = { value: gradientBlend };
-      shader.uniforms.uGradientCurve = { value: gradientCurve };
-      shader.uniforms.uWindEnabled = { value: windEnabled };
-      shader.uniforms.uWindStrength = { value: windStrength };
-      shader.uniforms.uWindDirectionScale = { value: windDirectionScale };
-      shader.uniforms.uWindDirectionSpeed = { value: windDirectionSpeed };
-      shader.uniforms.uWindStrengthScale = { value: windStrengthScale };
-      shader.uniforms.uWindStrengthSpeed = { value: windStrengthSpeed };
-      shader.uniforms.uPlayerInteractionEnabled = {
-        value: playerInteractionEnabled,
-      };
-      shader.uniforms.uPlayerInteractionRange = {
-        value: playerInteractionRange,
-      };
-      shader.uniforms.uPlayerInteractionStrength = {
-        value: playerInteractionStrength,
-      };
-      shader.uniforms.uNormalMixEnabled = { value: normalMixEnabled };
-      shader.uniforms.uNormalMixFactor = { value: normalMixFactor };
-      shader.uniforms.uBackscatterEnabled = { value: backscatterEnabled };
-      shader.uniforms.uBackscatterIntensity = { value: backscatterIntensity };
-      shader.uniforms.uBackscatterColor = {
-        value: backscatterColorRef.current,
-      };
-      shader.uniforms.uBackscatterPower = { value: backscatterPower };
-      shader.uniforms.uFrontScatterStrength = { value: frontScatterStrength };
-      shader.uniforms.uRimSSSStrength = { value: rimSSSStrength };
-      shader.uniforms.uSpecularEnabled = { value: specularEnabled };
-      shader.uniforms.uSpecularIntensity = { value: specularIntensity };
-      shader.uniforms.uSpecularColor = { value: specularColorRef.current };
-      shader.uniforms.uSpecularPower = { value: specularPower };
-      shader.uniforms.uSpecularScale = { value: specularScale };
-      shader.uniforms.uLightDirection = {
-        value: new THREE.Vector3(
-          lightDirectionX,
-          lightDirectionY,
-          lightDirectionZ
-        ),
-      };
-      shader.uniforms.uAoEnabled = { value: aoEnabled };
-      shader.uniforms.uAoIntensity = { value: aoIntensity };
+        shader.vertexShader = grassVertexShader;
+        shader.fragmentShader = grassFragmentShader;
 
-      shader.vertexShader = grassVertexShader;
-      shader.fragmentShader = grassFragmentShader;
-
-      mat.userData.shader = shader;
-    };
-
-    mat.needsUpdate = true;
+        mat.userData.shader = shader;
+        mat.needsUpdate = true;
+      };
+    });
 
     return () => {
-      mat.dispose();
+      lodMaterials.forEach((mat) => {
+        if (mat) mat.dispose();
+      });
     };
-  }, [heightmap, terrainHeight, terrainOffset, terrainSize]);
+  }, [lodMaterials, heightmap, terrainHeight, terrainOffset, terrainSize]);
 
   // Update colors when they change
   useEffect(() => {
@@ -853,69 +952,86 @@ export function GrassPatch({
 
   // OPTIMIZED: Only update dynamic uniforms in useFrame
   useFrame((state) => {
-    const shader = materialRef.current?.userData?.shader;
-    if (!shader) return;
-
-    // ONLY update time-varying uniforms (critical optimization)
-    shader.uniforms.time.value = state.clock.elapsedTime;
-    shader.uniforms.viewMatrixInverse.value.copy(state.camera.matrixWorld);
-    if (playerPosition) {
-      shader.uniforms.playerPos.value.copy(playerPosition);
-    }
-
     // LOD visibility management based on distance
     const patchCenter = new THREE.Vector3(...position);
     const distance = camera.position.distanceTo(patchCenter);
 
+    // First, hide all LODs
+    lodMeshRefs.current.forEach((ref) => {
+      if (ref.current) {
+        ref.current.visible = false;
+      }
+    });
+
+    // Then, show only the appropriate LOD based on distance
+    let visibleLODIndex = -1;
     lodMeshRefs.current.forEach((ref, index) => {
       if (ref.current) {
         const config = LOD_CONFIGS[index];
         const shouldBeVisible =
           distance >= config.minDistance && distance < config.maxDistance;
-        ref.current.visible = shouldBeVisible;
 
-        // Update grassParams for each LOD level
         if (shouldBeVisible) {
-          const GRASS_VERTICES = (config.segments + 1) * 2;
-          shader.uniforms.grassParams.value.set(
-            config.segments,
-            GRASS_VERTICES,
-            terrainHeight,
-            terrainOffset
-          );
+          ref.current.visible = true;
+          visibleLODIndex = index;
         }
       }
     });
 
-    // DEBUG: Ensure at least one LOD is visible
-    const hasVisibleLOD = lodMeshRefs.current.some(
-      (ref) => ref.current?.visible
-    );
-    if (!hasVisibleLOD && lodMeshRefs.current[0]?.current) {
-      // If nothing is visible, show the closest LOD
-      lodMeshRefs.current[0].current.visible = true;
+    // Fallback: if no LOD matches, show the closest one (HIGH)
+    if (visibleLODIndex === -1) {
+      visibleLODIndex = 0;
+    }
+
+    // Update active LOD index if it changed
+    if (visibleLODIndex !== activeLODIndexRef.current) {
+      activeLODIndexRef.current = visibleLODIndex;
+      setActiveLODIndex(visibleLODIndex);
+    }
+
+    // Update uniforms only for the visible LOD
+    if (visibleLODIndex >= 0) {
+      const config = LOD_CONFIGS[visibleLODIndex];
+      const mat = lodMaterials[visibleLODIndex];
+      const shader = mat?.userData?.shader;
+      if (shader) {
+        // Update time-varying uniforms
+        shader.uniforms.time.value = state.clock.elapsedTime;
+        shader.uniforms.viewMatrixInverse.value.copy(state.camera.matrixWorld);
+        if (playerPosition) {
+          shader.uniforms.playerPos.value.copy(playerPosition);
+        }
+
+        // Update grassParams for this specific LOD level
+        const GRASS_VERTICES = (config.segments + 1) * 2;
+        shader.uniforms.grassParams.value.set(
+          config.segments,
+          GRASS_VERTICES,
+          terrainHeight,
+          terrainOffset
+        );
+      }
     }
   });
 
   return (
     <group position={position}>
-      {LOD_CONFIGS.map((config, index) => (
-        <mesh
-          key={config.name}
-          ref={lodMeshRefs.current[index]}
-          geometry={lodGeometries[index]}
-          castShadow={castShadow}
-          receiveShadow={receiveShadow}
-          frustumCulled={true}
-          visible={index === 0} // Start with first LOD visible, controlled by useFrame
-        >
-          <primitive
-            ref={index === 0 ? materialRef : null}
-            object={material}
-            attach="material"
+      {LOD_CONFIGS.map((config, index) => {
+        // Only render the active LOD mesh
+        if (index !== activeLODIndex) return null;
+
+        return (
+          <mesh
+            key={config.name}
+            ref={lodMeshRefs.current[index]}
+            geometry={lodGeometries[index]}
+            material={lodMaterials[index]}
+            castShadow={false}
+            receiveShadow={false}
+            frustumCulled={true}
           />
-        </mesh>
-      ))}
+        );
+      })}
     </group>
   );
 }
@@ -935,11 +1051,15 @@ export function GrassField({
   const { camera } = useThree();
 
   // Generate all possible patch positions
+  // Support both single number (square grid) and array [xSize, zSize] for 2.5D games
   const allPatchPositions = useMemo(() => {
     const result = [];
-    const half = Math.floor(gridSize / 2);
-    for (let x = -half; x <= half; x++) {
-      for (let z = -half; z <= half; z++) {
+    const gridX = Array.isArray(gridSize) ? gridSize[0] : gridSize;
+    const gridZ = Array.isArray(gridSize) ? gridSize[1] : gridSize;
+    const halfX = Math.floor(gridX / 2);
+    const halfZ = Math.floor(gridZ / 2);
+    for (let x = -halfX; x <= halfX; x++) {
+      for (let z = -halfZ; z <= halfZ; z++) {
         result.push({
           key: `${x}-${z}`,
           position: [

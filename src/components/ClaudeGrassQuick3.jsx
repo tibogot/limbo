@@ -317,11 +317,25 @@ void main() {
 
   // Blade world position
   grassBladeWorldPos = (modelMatrix * vec4(grassOffset, 1.0)).xyz;
+  // heightParams: x=terrainSize, y=terrainCenterZ (mesh Z offset), z=unused, w=unused
+  // Terrain is PlaneGeometry rotated -90° around X, positioned at [0, 0, terrainCenterZ]
+  // PlaneGeometry: X and Y are plane dimensions, Z is height
+  // After rotation: Plane X → World X, Plane Y → World -Z, Plane Z → World Y
+  // After position: World X = Plane X, World Y = Plane Z, World Z = -Plane Y + terrainCenterZ
+  // So: Plane X = World X, Plane Y = -(World Z - terrainCenterZ) = terrainCenterZ - World Z
+  // Heightmap texture: U maps to Plane X, V maps to Plane Y
+  float terrainCenterZ = heightParams.y;
+  float halfSize = heightParams.x * 0.5;
+  float planeX = grassBladeWorldPos.x;
+  float planeY = terrainCenterZ - grassBladeWorldPos.z;
   heightmapUV = vec2(
-      remap(grassBladeWorldPos.x, -heightParams.x * 0.5, heightParams.x * 0.5, 0.0, 1.0),
-      remap(grassBladeWorldPos.z, -heightParams.x * 0.5, heightParams.x * 0.5, 1.0, 0.0));
+      remap(planeX, -halfSize, halfSize, 0.0, 1.0),
+      remap(planeY, -halfSize, halfSize, 1.0, 0.0)  // Inverted because texture V goes top to bottom
+  );
   heightmapSample = texture2D(heightmap, heightmapUV);
-  grassBladeWorldPos.y += heightmapSample.x * grassParams.z - grassParams.w;
+  // grassParams.z = terrainHeight, grassParams.w = terrainOffset (Z offset, not Y offset)
+  // Only apply height from heightmap, don't subtract terrainOffset from Y
+  grassBladeWorldPos.y += heightmapSample.x * grassParams.z;
 
   heightmapSampleHeight = 1.0;
 
@@ -916,6 +930,7 @@ export default function ClaudeGrassQuick3({
   terrainSize = 100,
   heightScale = 1,
   heightOffset = 0,
+  terrainOffset = 0,
   grassWidth = 0.1,
   grassHeight = 1.5,
   lodDistance = 15,
@@ -1041,7 +1056,7 @@ export default function ClaudeGrassQuick3({
           shader.uniforms.time = { value: 0.0 };
           shader.uniforms.heightmap = { value: hmap };
           shader.uniforms.heightParams = {
-            value: new THREE.Vector4(100, 0, 0, 0), // terrainSize - will be updated via useEffect
+            value: new THREE.Vector4(100, terrainOffset, 0, 0), // x=terrainSize, y=terrainCenterZ - will be updated via useEffect
           };
           shader.uniforms.playerPos = { value: new THREE.Vector3(0, 0, 0) };
           shader.uniforms.viewMatrixInverse = { value: new THREE.Matrix4() };
@@ -1229,6 +1244,7 @@ export default function ClaudeGrassQuick3({
         0
       );
       materialLow.userData.shader.uniforms.heightParams.value.x = terrainSize;
+      materialLow.userData.shader.uniforms.heightParams.value.y = terrainOffset;
       // Update wind uniforms
       materialLow.userData.shader.uniforms.windParams.value.set(
         windDirectionScale,
@@ -1333,6 +1349,7 @@ export default function ClaudeGrassQuick3({
         0
       );
       materialHigh.userData.shader.uniforms.heightParams.value.x = terrainSize;
+      materialHigh.userData.shader.uniforms.heightParams.value.y = terrainOffset;
       // Update wind uniforms
       materialHigh.userData.shader.uniforms.windParams.value.set(
         windDirectionScale,

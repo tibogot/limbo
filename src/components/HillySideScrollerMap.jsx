@@ -1,21 +1,43 @@
 import { RigidBody } from "@react-three/rapier";
 import { useFrame } from "@react-three/fiber";
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
 import { createNoise2D } from "simplex-noise";
 import * as THREE from "three";
+import {
+  computeBoundsTree,
+  disposeBoundsTree,
+  acceleratedRaycast,
+} from "three-mesh-bvh";
 import ClaudeGrassQuick3 from "./ClaudeGrassQuick3";
-import { GrassField } from "./GrassClaude7";
+import { GrassField as GrassField7 } from "./GrassClaude7";
 import { useGrassClaude7Controls } from "./useGrassClaude7Controls";
+import { GrassField as GrassField6 } from "./GrassClaude6";
+import { useGrassClaude6Controls } from "./useGrassClaude6Controls";
+import GrassFromScratch from "./GrassFromScratch";
+import { useGrassFromScratchControls } from "./useGrassFromScratchControls";
+import GFS2 from "./GFS2";
+import { useGFS2Controls } from "./useGFS2Controls";
 
 export const HillySideScrollerMap = ({
   playerPosition = [0, 0, 0],
   grassControls,
+  onTerrainReady,
   ...props
 }) => {
   // Get GrassClaude7 controls
   const grassClaude7Controls = useGrassClaude7Controls();
+  // Get GrassClaude6 controls
+  const grassClaude6Controls = useGrassClaude6Controls();
+  // Get GrassFromScratch controls
+  const grassFromScratchControls = useGrassFromScratchControls();
+  // Get GFS2 controls
+  const gfs2Controls = useGFS2Controls();
   const groundRef = useRef();
   const playerPosRef = useRef(new THREE.Vector3(...playerPosition));
+  const [terrainReady, setTerrainReady] = useState(false);
+  const terrainBVHRef = useRef(null);
+  const terrainMeshRef = useRef(null);
+  const getHeightAtWorldPositionRef = useRef(null);
 
   // Update player position reactively
   useFrame(() => {
@@ -30,160 +52,232 @@ export const HillySideScrollerMap = ({
 
   // Generate 500x500 procedural terrain with hills
   // Hills are flatter near character (Z=0) and more prominent in background (negative Z)
-  const { terrainGeometry, terrainMaterial, heightData, heightmapTexture } = useMemo(() => {
-    const size = 500; // 500x500 terrain
-    const segments = 200; // High detail for smooth hills
-    const maxHeight = 15; // Maximum hill height (slightly increased for bigger hills)
-    const noiseScale = 0.005; // Lower scale for bigger, smoother hills (fewer, larger features)
+  const { terrainGeometry, terrainMaterial, heightData, heightmapTexture } =
+    useMemo(() => {
+      const size = 500; // 500x500 terrain
+      const segments = 200; // High detail for smooth hills
+      const maxHeight = 15; // Maximum hill height (slightly increased for bigger hills)
+      const noiseScale = 0.005; // Lower scale for bigger, smoother hills (fewer, larger features)
 
-    // Create simplex noise
-    const noise2D = createNoise2D(() => Math.random());
+      // Create simplex noise
+      const noise2D = createNoise2D(() => Math.random());
 
-    // Create plane geometry
-    const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
-    const positions = geometry.attributes.position;
-    const vertexCount = segments + 1;
-    const heightData = new Float32Array((segments + 1) * (segments + 1));
+      // Create plane geometry
+      const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+      const positions = geometry.attributes.position;
+      const vertexCount = segments + 1;
+      const heightData = new Float32Array((segments + 1) * (segments + 1));
 
-    // Generate smooth hills using noise
-    for (let i = 0; i < positions.count; i++) {
-      const x = i % vertexCount;
-      const z = Math.floor(i / vertexCount);
+      // Generate smooth hills using noise
+      for (let i = 0; i < positions.count; i++) {
+        const x = i % vertexCount;
+        const z = Math.floor(i / vertexCount);
 
-      // Normalize to 0-1 range
-      const nx = x / segments;
-      const nz = z / segments;
+        // Normalize to 0-1 range
+        const nx = x / segments;
+        const nz = z / segments;
 
-      // Map to world coordinates (centered at origin)
-      // X: -250 to 250 (left-right)
-      // Z: -250 to 250 (back to front, where character is at Z=0)
-      const worldX = (nx - 0.5) * size;
-      const worldZ = (nz - 0.5) * size;
+        // Map to world coordinates for 2.5D side-scroller
+        // X: -250 to 250 (left-right, centered)
+        // Z: -250 to 250 (will be shifted by mesh position)
+        // Terrain mesh will be positioned to place playable area at front
+        const worldX = (nx - 0.5) * size;
+        const worldZ = (nz - 0.5) * size;
 
-      // Use multiple octaves for smooth hills
-      let height = 0;
-      let amplitude = 1;
-      let frequency = 1;
-      let maxValue = 0;
+        // Use multiple octaves for smooth hills
+        let height = 0;
+        let amplitude = 1;
+        let frequency = 1;
+        let maxValue = 0;
 
-      // 2 octaves for very smooth, large hills (fewer octaves = smoother, less detail)
-      for (let octave = 0; octave < 2; octave++) {
-        const sampleX = worldX * frequency * noiseScale;
-        const sampleZ = worldZ * frequency * noiseScale;
-        height += noise2D(sampleX, sampleZ) * amplitude;
-        maxValue += amplitude;
-        amplitude *= 0.5;
-        frequency *= 2;
+        // 2 octaves for very smooth, large hills (fewer octaves = smoother, less detail)
+        for (let octave = 0; octave < 2; octave++) {
+          const sampleX = worldX * frequency * noiseScale;
+          const sampleZ = worldZ * frequency * noiseScale;
+          height += noise2D(sampleX, sampleZ) * amplitude;
+          maxValue += amplitude;
+          amplitude *= 0.5;
+          frequency *= 2;
+        }
+
+        // Normalize to 0-1 range
+        height = (height / maxValue + 1) * 0.5;
+
+        // Apply very smooth curve for gentle, rolling hills
+        height = Math.pow(height, 1.1);
+
+        // Scale to desired height
+        height *= maxHeight;
+
+        // For 2.5D side view: hills should be flatter near character (world Z=0)
+        // and more prominent in background (negative Z, further from camera)
+        // Character is at world Z=0, which is local Z=150 (mesh is at Z=-150)
+        // Terrain mesh is positioned at Z=-150, so world Z=0 = local Z=150
+
+        const meshZOffset = 150; // Mesh is positioned at Z=-150, so add 150 to get world Z
+        const worldZPosition = worldZ + meshZOffset; // Convert local Z to world Z
+
+        // Keep it very flat near character (world Z=0 area, which is local Z=150)
+        const flatZone = 15; // Keep flat within 15 units of world Z=0
+        if (Math.abs(worldZPosition) < flatZone) {
+          // Very flat near character - fade from 0 to small height
+          const flatFactor = Math.abs(worldZPosition) / flatZone; // 0 at center, 1 at edge
+          height *= flatFactor * 0.15; // Very flat near character
+        } else if (worldZPosition < 0) {
+          // Background (negative world Z) - hills increase as we go further back
+          const backDistance = Math.abs(worldZPosition) - flatZone; // Distance beyond flat zone
+          const maxBackDistance = size / 2 - flatZone; // Maximum distance to edge
+          const normalizedBack = Math.min(backDistance / maxBackDistance, 1);
+          // Hills increase more quickly toward background (lower exponent = faster increase)
+          const fadeFactor = Math.pow(normalizedBack, 0.5);
+          height *= 0.15 + fadeFactor * 0.85; // Start from flat zone height, increase to full
+        } else {
+          // Foreground (positive world Z) - keep relatively flat
+          const frontDistance = worldZPosition - flatZone;
+          const maxFrontDistance = size / 2 - flatZone;
+          const normalizedFront = Math.min(frontDistance / maxFrontDistance, 1);
+          const fadeFactor = Math.pow(normalizedFront, 0.8);
+          height *= 0.15 + fadeFactor * 0.4; // Less hills in foreground
+        }
+
+        // Store height data for potential use
+        const heightIndex = z * vertexCount + x;
+        heightData[heightIndex] = height;
+
+        // Set the Y coordinate (height) - PlaneGeometry uses Z as height before rotation
+        positions.setZ(i, height);
       }
 
-      // Normalize to 0-1 range
-      height = (height / maxValue + 1) * 0.5;
+      // Recalculate normals for proper lighting
+      geometry.computeVertexNormals();
 
-      // Apply very smooth curve for gentle, rolling hills
-      height = Math.pow(height, 1.1);
+      // Create material with a nice terrain color
+      const material = new THREE.MeshStandardMaterial({
+        color: 0x6b8e23, // Olive green terrain color
+        roughness: 0.9,
+        metalness: 0.0,
+      });
 
-      // Scale to desired height
-      height *= maxHeight;
+      // Create heightmap texture from heightData for grass
+      // Use 512x512 resolution for better detail and precision
+      const heightmapResolution = 512;
+      const textureData = new Float32Array(
+        heightmapResolution * heightmapResolution
+      );
 
-      // For 2.5D side view: hills should be flatter near character (Z=0) 
-      // and more prominent in background (negative Z, further from camera)
-      // Character is at Z=0, background is negative Z
-      
-      // Keep it very flat near character (Z=0 area)
-      const flatZone = 15; // Keep flat within 15 units of Z=0 (very close hills)
-      if (Math.abs(worldZ) < flatZone) {
-        // Very flat near character - fade from 0 to small height
-        const flatFactor = Math.abs(worldZ) / flatZone; // 0 at center, 1 at edge
-        height *= flatFactor * 0.15; // Very flat near character
-      } else if (worldZ < 0) {
-        // Background (negative Z) - hills increase as we go further back
-        const backDistance = Math.abs(worldZ) - flatZone; // Distance beyond flat zone
-        const maxBackDistance = size / 2 - flatZone; // Maximum distance to edge
-        const normalizedBack = Math.min(backDistance / maxBackDistance, 1);
-        // Hills increase more quickly toward background (lower exponent = faster increase)
-        const fadeFactor = Math.pow(normalizedBack, 0.5);
-        height *= 0.15 + fadeFactor * 0.85; // Start from flat zone height, increase to full
-      } else {
-        // Foreground (positive Z) - keep relatively flat
-        const frontDistance = worldZ - flatZone;
-        const maxFrontDistance = size / 2 - flatZone;
-        const normalizedFront = Math.min(frontDistance / maxFrontDistance, 1);
-        const fadeFactor = Math.pow(normalizedFront, 0.8);
-        height *= 0.15 + fadeFactor * 0.4; // Less hills in foreground
+      // Fill texture data by sampling heightData with bilinear interpolation
+      // Normalize height to 0-1 range based on maxHeight (not min/max of actual data)
+      // This ensures the shader can correctly scale it back using terrainHeight
+      // Note: Terrain is shifted backward by 150 units, so Z ranges from -400 to 100
+      for (let y = 0; y < heightmapResolution; y++) {
+        for (let x = 0; x < heightmapResolution; x++) {
+          // Map texture coordinates to heightData indices
+          const u = x / (heightmapResolution - 1);
+          const v = y / (heightmapResolution - 1);
+
+          const dataX = u * segments;
+          const dataY = v * segments;
+
+          const x0 = Math.floor(dataX);
+          const y0 = Math.floor(dataY);
+          const x1 = Math.min(x0 + 1, segments);
+          const y1 = Math.min(y0 + 1, segments);
+
+          // Bilinear interpolation
+          const fx = dataX - x0;
+          const fy = dataY - y0;
+
+          const h00 = heightData[y0 * (segments + 1) + x0] / maxHeight;
+          const h10 = heightData[y0 * (segments + 1) + x1] / maxHeight;
+          const h01 = heightData[y1 * (segments + 1) + x0] / maxHeight;
+          const h11 = heightData[y1 * (segments + 1) + x1] / maxHeight;
+
+          const h0 = h00 * (1 - fx) + h10 * fx;
+          const h1 = h01 * (1 - fx) + h11 * fx;
+          const height = h0 * (1 - fy) + h1 * fy;
+
+          textureData[y * heightmapResolution + x] = Math.max(
+            0,
+            Math.min(1, height)
+          );
+        }
       }
 
-      // Store height data for potential use
-      const heightIndex = z * vertexCount + x;
-      heightData[heightIndex] = height;
+      // Create DataTexture (R channel only for height)
+      const heightmapTexture = new THREE.DataTexture(
+        textureData,
+        heightmapResolution,
+        heightmapResolution,
+        THREE.RedFormat,
+        THREE.FloatType
+      );
+      heightmapTexture.needsUpdate = true;
+      heightmapTexture.wrapS = THREE.ClampToEdgeWrapping;
+      heightmapTexture.wrapT = THREE.ClampToEdgeWrapping;
+      heightmapTexture.minFilter = THREE.LinearFilter;
+      heightmapTexture.magFilter = THREE.LinearFilter;
 
-      // Set the Y coordinate (height) - PlaneGeometry uses Z as height before rotation
-      positions.setZ(i, height);
+      return {
+        terrainGeometry: geometry,
+        terrainMaterial: material,
+        heightData,
+        heightmapTexture,
+      };
+    }, []);
+
+  // Build BVH for terrain mesh
+  useEffect(() => {
+    if (terrainGeometry) {
+      // Enable accelerated raycasting
+      THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+      THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+      THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+      // Build BVH for the terrain geometry
+      if (!terrainGeometry.boundsTree) {
+        terrainGeometry.computeBoundsTree();
+      }
+      terrainBVHRef.current = terrainGeometry.boundsTree;
+
+      // Wait a bit for mesh to be ready
+      const timer = setTimeout(() => {
+        setTerrainReady(true);
+        // Expose height function to parent
+        if (onTerrainReady && getHeightAtWorldPositionRef.current) {
+          onTerrainReady(getHeightAtWorldPositionRef.current);
+        }
+      }, 100);
+      return () => clearTimeout(timer);
     }
+  }, [terrainGeometry, onTerrainReady]);
 
-    // Recalculate normals for proper lighting
-    geometry.computeVertexNormals();
-
-    // Create material with a nice terrain color
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x6b8e23, // Olive green terrain color
-      roughness: 0.9,
-      metalness: 0.0,
-    });
-
-    // Create heightmap texture from heightData for grass
-    // Use 512x512 resolution for better detail and precision
-    const heightmapResolution = 512;
-    const textureData = new Float32Array(heightmapResolution * heightmapResolution);
-    
-    // Fill texture data by sampling heightData with bilinear interpolation
-    // Normalize height to 0-1 range based on maxHeight (not min/max of actual data)
-    // This ensures the shader can correctly scale it back using terrainHeight
-    for (let y = 0; y < heightmapResolution; y++) {
-      for (let x = 0; x < heightmapResolution; x++) {
-        // Map texture coordinates to heightData indices
-        const u = x / (heightmapResolution - 1);
-        const v = y / (heightmapResolution - 1);
-        
-        const dataX = u * segments;
-        const dataY = v * segments;
-        
-        const x0 = Math.floor(dataX);
-        const y0 = Math.floor(dataY);
-        const x1 = Math.min(x0 + 1, segments);
-        const y1 = Math.min(y0 + 1, segments);
-        
-        // Bilinear interpolation
-        const fx = dataX - x0;
-        const fy = dataY - y0;
-        
-        const h00 = heightData[y0 * (segments + 1) + x0] / maxHeight;
-        const h10 = heightData[y0 * (segments + 1) + x1] / maxHeight;
-        const h01 = heightData[y1 * (segments + 1) + x0] / maxHeight;
-        const h11 = heightData[y1 * (segments + 1) + x1] / maxHeight;
-        
-        const h0 = h00 * (1 - fx) + h10 * fx;
-        const h1 = h01 * (1 - fx) + h11 * fx;
-        const height = h0 * (1 - fy) + h1 * fy;
-        
-        textureData[y * heightmapResolution + x] = Math.max(0, Math.min(1, height));
+  // Function to get height at world position using BVH raycast
+  const getHeightAtWorldPosition = useMemo(() => {
+    const fn = (worldX, worldY, worldZ) => {
+      if (!terrainBVHRef.current || !terrainMeshRef.current) {
+        return worldY; // Fallback to input Y if BVH not ready
       }
-    }
-    
-    // Create DataTexture (R channel only for height)
-    const heightmapTexture = new THREE.DataTexture(
-      textureData,
-      heightmapResolution,
-      heightmapResolution,
-      THREE.RedFormat,
-      THREE.FloatType
-    );
-    heightmapTexture.needsUpdate = true;
-    heightmapTexture.wrapS = THREE.ClampToEdgeWrapping;
-    heightmapTexture.wrapT = THREE.ClampToEdgeWrapping;
-    heightmapTexture.minFilter = THREE.LinearFilter;
-    heightmapTexture.magFilter = THREE.LinearFilter;
 
-    return { terrainGeometry: geometry, terrainMaterial: material, heightData, heightmapTexture };
+      const raycaster = new THREE.Raycaster();
+      const rayOrigin = new THREE.Vector3(worldX, worldY + 100, worldZ); // Start high above
+      const rayDirection = new THREE.Vector3(0, -1, 0); // Cast downward
+
+      raycaster.set(rayOrigin, rayDirection);
+      raycaster.firstHitOnly = true;
+
+      const intersects = raycaster.intersectObject(
+        terrainMeshRef.current,
+        false
+      );
+
+      if (intersects.length > 0) {
+        return intersects[0].point.y;
+      }
+
+      return worldY; // Fallback if no intersection
+    };
+    getHeightAtWorldPositionRef.current = fn;
+    return fn;
   }, []);
 
   return (
@@ -192,11 +286,16 @@ export const HillySideScrollerMap = ({
       {/* Hills are flatter near character (Z=0) and more prominent in background */}
       <RigidBody type="fixed" colliders="trimesh">
         <mesh
-          ref={groundRef}
+          ref={(mesh) => {
+            groundRef.current = mesh;
+            if (mesh) {
+              terrainMeshRef.current = mesh;
+            }
+          }}
           geometry={terrainGeometry}
           material={terrainMaterial}
           rotation={[-Math.PI / 2, 0, 0]}
-          position={[0, 0, 0]}
+          position={[0, 0, -150]}
           receiveShadow
           castShadow
         />
@@ -209,10 +308,12 @@ export const HillySideScrollerMap = ({
           const size = 500;
           const segments = 200;
           const vertexCount = segments + 1;
+          const terrainShift = -150; // Terrain is shifted backward by 150 units
 
           // Convert world coordinates to normalized coordinates (0-1)
+          // Account for terrain mesh position shift: mesh is at Z=-150
           const nx = (worldX + size / 2) / size; // -250 to 250 -> 0 to 1
-          const nz = (worldZ + size / 2) / size; // -250 to 250 -> 0 to 1
+          const nz = (worldZ - terrainShift + size / 2) / size; // Adjusted for mesh position shift
 
           // Clamp to valid range
           const clampedX = Math.max(0, Math.min(1, nx));
@@ -235,8 +336,8 @@ export const HillySideScrollerMap = ({
           const h11 = heightData[z1 * vertexCount + x1];
 
           // Bilinear interpolation
-          const fx = (clampedX * segments) - xIndex;
-          const fz = (clampedZ * segments) - zIndex;
+          const fx = clampedX * segments - xIndex;
+          const fz = clampedZ * segments - zIndex;
 
           const h0 = h00 * (1 - fx) + h10 * fx;
           const h1 = h01 * (1 - fx) + h11 * fx;
@@ -332,9 +433,10 @@ export const HillySideScrollerMap = ({
           const size = 500;
           const segments = 200;
           const vertexCount = segments + 1;
+          const terrainShift = -150; // Terrain is shifted backward by 150 units
 
           const nx = (worldX + size / 2) / size;
-          const nz = (worldZ + size / 2) / size;
+          const nz = (worldZ - terrainShift + size / 2) / size; // Adjusted for terrain shift
 
           const clampedX = Math.max(0, Math.min(1, nx));
           const clampedZ = Math.max(0, Math.min(1, nz));
@@ -352,8 +454,8 @@ export const HillySideScrollerMap = ({
           const h01 = heightData[z1 * vertexCount + x0];
           const h11 = heightData[z1 * vertexCount + x1];
 
-          const fx = (clampedX * segments) - xIndex;
-          const fz = (clampedZ * segments) - zIndex;
+          const fx = clampedX * segments - xIndex;
+          const fz = clampedZ * segments - zIndex;
 
           const h0 = h00 * (1 - fx) + h10 * fx;
           const h1 = h01 * (1 - fx) + h11 * fx;
@@ -409,8 +511,8 @@ export const HillySideScrollerMap = ({
           const h01 = heightData[z1 * vertexCount + x0];
           const h11 = heightData[z1 * vertexCount + x1];
 
-          const fx = (clampedX * segments) - xIndex;
-          const fz = (clampedZ * segments) - zIndex;
+          const fx = clampedX * segments - xIndex;
+          const fz = clampedZ * segments - zIndex;
 
           const h0 = h00 * (1 - fx) + h10 * fx;
           const h1 = h01 * (1 - fx) + h11 * fx;
@@ -470,8 +572,8 @@ export const HillySideScrollerMap = ({
           const h01 = heightData[z1 * vertexCount + x0];
           const h11 = heightData[z1 * vertexCount + x1];
 
-          const fx = (clampedX * segments) - xIndex;
-          const fz = (clampedZ * segments) - zIndex;
+          const fx = clampedX * segments - xIndex;
+          const fz = clampedZ * segments - zIndex;
 
           const h0 = h00 * (1 - fx) + h10 * fx;
           const h1 = h01 * (1 - fx) + h11 * fx;
@@ -508,9 +610,10 @@ export const HillySideScrollerMap = ({
           <ClaudeGrassQuick3
             key="grass"
             playerPosition={playerPosRef.current}
-            terrainSize={cgq3.terrainSize ?? 100}
+            terrainSize={cgq3.terrainSize ?? 500}
             heightScale={cgq3.heightScale ?? 1}
             heightOffset={cgq3.heightOffset ?? 0}
+            terrainOffset={-150}
             grassWidth={cgq3.grassWidth ?? 0.02}
             grassHeight={cgq3.grassHeight ?? 0.25}
             lodDistance={cgq3.lodDistance ?? 15}
@@ -562,26 +665,90 @@ export const HillySideScrollerMap = ({
         );
       })()}
 
-      {/* GrassClaude7 component */}
-      {(grassClaude7Controls?.grassClaude7?.grassClaude7Enabled ||
-        grassClaude7Controls?.grassClaude7Enabled) && (
-        <GrassField
-          gridSize={15}
-          patchSpacing={8}
-          centerPosition={[0, 0, 0]}
-          playerPosition={playerPosRef.current}
-          renderDistance={80}
-          patchSize={8}
-          grassWidth={0.03}
-          grassHeight={0.5}
-          heightmap={heightmapTexture}
-          terrainHeight={15}
-          terrainOffset={0}
-          terrainSize={500}
-          fogEnabled={false}
-        />
-      )}
+      {/* GrassClaude7 component - only render when terrain is ready */}
+      {terrainReady &&
+        heightmapTexture &&
+        (grassClaude7Controls?.grassClaude7?.grassClaude7Enabled ||
+          grassClaude7Controls?.grassClaude7Enabled) && (
+          <GrassField7
+            gridSize={[25, 8]}
+            patchSpacing={8}
+            centerPosition={[0, 0, 0]}
+            playerPosition={playerPosRef.current}
+            renderDistance={50}
+            patchSize={8}
+            grassWidth={0.03}
+            grassHeight={0.35}
+            heightmap={heightmapTexture}
+            terrainHeight={15}
+            terrainOffset={-150}
+            terrainSize={500}
+            fogEnabled={true}
+            fogNear={5.0}
+            fogFar={50.0}
+            fogColor="#cccccc"
+            fogIntensity={1.0}
+          />
+        )}
+
+      {/* GrassClaude6 component - only render when terrain is ready */}
+      {terrainReady &&
+        heightmapTexture &&
+        (grassClaude6Controls?.grassClaude6?.grassClaude6Enabled ||
+          grassClaude6Controls?.grassClaude6Enabled) && (
+          <GrassField6
+            gridSize={25}
+            patchSpacing={8}
+            centerPosition={[0, 0, 0]}
+            playerPosition={playerPosRef.current}
+            patchSize={8}
+            grassWidth={0.02}
+            grassHeight={0.35}
+            heightmap={heightmapTexture}
+            terrainHeight={15}
+            terrainOffset={-150}
+            terrainSize={500}
+            fogEnabled={true}
+            fogNear={5.0}
+            fogFar={50.0}
+            fogColor="#cccccc"
+            fogIntensity={1.0}
+            lodDistance={15}
+            maxDistance={50}
+          />
+        )}
+
+      {/* GrassFromScratch component - only render when terrain is ready */}
+      {terrainReady &&
+        heightData &&
+        (grassFromScratchControls?.grassFromScratch?.grassFromScratchEnabled ||
+          grassFromScratchControls?.grassFromScratchEnabled) && (
+          <GrassFromScratch
+            heightData={heightData}
+            terrainSize={500}
+            terrainSegments={200}
+            terrainOffset={-150}
+            terrainHeight={15}
+          />
+        )}
+
+      {/* GFS2 component (Shader-based grass) - only render when terrain is ready */}
+      {terrainReady &&
+        heightData &&
+        (gfs2Controls?.gfs2?.gfs2Enabled || gfs2Controls?.gfs2Enabled) && (
+          <GFS2
+            heightData={heightData}
+            terrainSize={500}
+            terrainSegments={200}
+            terrainOffset={-150}
+            terrainHeight={15}
+            showNormals={
+              gfs2Controls?.gfs2?.showNormals ||
+              gfs2Controls?.showNormals ||
+              false
+            }
+          />
+        )}
     </group>
   );
 };
-
