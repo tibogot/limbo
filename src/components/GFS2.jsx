@@ -2,7 +2,7 @@ import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
-const GRASS_BLADES = 1024;
+const GRASS_BLADES = 4096; // 64x64 = 4,096 blades (cranked up from 32x32 = 1,024)
 const GRASS_SEGMENTS = 6; // Number of segments in the blade
 const GRASS_VERTICES = (GRASS_SEGMENTS + 1) * 2; // Vertices per blade (front and back)
 const GRASS_PATCH_SIZE = 10;
@@ -18,6 +18,8 @@ varying float vHeightPercent;
 varying vec3 vRotatedNormal1;
 varying vec3 vRotatedNormal2;
 varying float vWidthPercent;
+varying vec3 vViewPosition;
+varying vec3 vUpVectorViewSpace; // Up vector transformed to view space
 
 attribute float vertIndex;
 attribute vec3 instancePosition; // Instanced attribute for grass blade position (uint16, half float encoded)
@@ -104,6 +106,11 @@ float easeOut(float t, float power) {
   return pow(t, power);
 }
 
+// Ease in function for color gradient
+float easeIn(float t, float power) {
+  return pow(t, power);
+}
+
 void main() {
   // Decode half float position values (matches tutorial)
   // The instancePosition is encoded as uint16 (half floats), but WebGL reads it as float
@@ -118,7 +125,7 @@ void main() {
   vec2 hash1 = hash12(grassBladeWorldPos.xz + vec2(1.0, 0.0));
   vec2 hash2 = hash12(grassBladeWorldPos.xz + vec2(2.0, 0.0));
   float randomHeight = mix(0.75, 1.5, hash1.x);
-  float randomLean = mix(0.1, 0.4, hash2.x);
+  float randomLean = mix(0.3, 0.7, hash2.x); // Increased from 0.1-0.4 to 0.3-0.7 for more visible curve
   
   float GRASS_SEGMENTS_F = ${GRASS_SEGMENTS}.0;
   float GRASS_VERTICES_F = ${GRASS_VERTICES}.0;
@@ -181,9 +188,16 @@ void main() {
   // They are rotated ONLY by rotateY(PI * 0.3) and rotateY(PI * -0.3)
   // "before any other transformations" - matches tutorial exactly
   
-  // Single color per blade - matches tutorial (no gradient, no per-blade variation)
-  // Brighter base color to show lighting variation better
-  vColor = vec3(0.15, 0.5, 0.08); // Simple green color - slightly brighter (was 0.1, 0.4, 0.05)
+  // Color gradient from base to tip - matches tutorial exactly
+  // I just picked 2 colours, darker green and a yellowish colour.
+  // Adjusted to more natural hues - base is rich dark green, tip is vibrant lime-yellow
+  vec3 baseColour = vec3(0.08, 0.35, 0.02); // Rich dark green base
+  vec3 tipColour = vec3(0.7, 0.85, 0.25); // Natural lime-yellow-green tip (more green in yellow)
+  
+  // Do a gradient from base to tip, controlled by shaping function.
+  vec3 diffuseColour = mix(baseColour, tipColour, easeIn(heightPercent, 4.0));
+  
+  vColor = diffuseColour;
   vHeightPercent = heightPercent;
   
   // Transform normals to view space for lighting (normalMatrix handles non-uniform scaling)
@@ -199,6 +213,13 @@ void main() {
   // Final position in model space
   vec4 modelPosition = modelMatrix * vec4(grassVertexPosition, 1.0);
   vec4 mvPosition = viewMatrix * modelPosition;
+  
+  // Pass view position for distance calculation in fragment shader
+  vViewPosition = mvPosition.xyz;
+  
+  // Transform up vector to view space for normal blending with terrain
+  vec3 upVectorWorld = vec3(0.0, 1.0, 0.0); // World up vector
+  vUpVectorViewSpace = normalize((viewMatrix * vec4(upVectorWorld, 0.0)).xyz); // Transform to view space
   
   // View-space thickening based on camera angle (matches tutorial exactly)
   // Calculate grass face normal (perpendicular to blade surface) in world space
@@ -241,8 +262,18 @@ varying float vHeightPercent;
 varying vec3 vRotatedNormal1;
 varying vec3 vRotatedNormal2;
 varying float vWidthPercent;
+varying vec3 vViewPosition;
+varying vec3 vUpVectorViewSpace; // Up vector transformed to view space
 
 uniform bool showNormals; // Debug: show normals as color
+uniform float terrainNormalBlendStart; // Distance where blending starts
+uniform float terrainNormalBlendEnd; // Distance where blending ends
+uniform float density; // Density in range [0, 1] - 0 = no grass, 1 = full grass
+
+// Ease in function for AO calculation
+float easeIn(float t, float power) {
+  return pow(t, power);
+}
 
 void main() {
   // FRAGMENT SHADER: Blend between rotated normals for 3D appearance (matches tutorial)
@@ -252,6 +283,15 @@ void main() {
   
   float normalMixFactor = vWidthPercent;
   vec3 normal = mix(vRotatedNormal1, vRotatedNormal2, normalMixFactor);
+  normal = normalize(normal);
+  
+  // Blend the normal with the up vector (terrain normal) depending on the distance
+  // With the specular i just blend the normal with the up vector based on distance
+  float viewDistance = length(vViewPosition);
+  float normalBlendFactor = smoothstep(terrainNormalBlendStart, terrainNormalBlendEnd, viewDistance);
+  
+  // Blend normal with up vector - far away grass uses up vector, close uses blade normal
+  normal = mix(normal, vUpVectorViewSpace, normalBlendFactor);
   normal = normalize(normal);
   
   // DEBUG: Visualize normals as color (normal ranges from -1 to 1, map to 0 to 1)
@@ -269,16 +309,26 @@ void main() {
   // Lambertian lighting: dot product between normal and light direction
   float NdotL = max(dot(normal, lightDir), 0.0);
   
-  // Ambient + diffuse lighting - increased contrast for more visible rounded effect
-  float ambient = 0.5; // Base ambient light (reduced to increase contrast)
-  float diffuse = NdotL * 1.2; // Diffuse contribution (increased significantly from 0.8)
-  float lighting = ambient + diffuse; // Range: 0.5 to 1.7 (more contrast)
+  // Lighting to show rounded 3D effect from normal blending
+  // Normals are rotated BEFORE other transformations (done in vertex shader)
+  float ambient = 0.85; // Higher ambient to brighten colors (was 0.6)
+  float diffuse = NdotL * 0.8; // Diffuse for rounded effect
+  float ambientLighting = ambient + diffuse; // Range: 0.85 to 1.65 (brighter overall)
   
-  // Simple ambient occlusion - darker at base (further reduced to preserve lighting variation)
-  float ao = mix(0.6, 1.0, pow(vHeightPercent, 2.0)); // Changed from 0.5 to 0.6
+  // Ambient occlusion based on density and height
+  // Density is in the range [0, 1]
+  // 0 being no grass
+  // 1 being full grass
+  float aoForDensity = mix(1.0, 0.25, density); // Fully dense areas get more shading (lower value)
   
-  // Combine lighting with color and AO
-  vec3 color = vColor * lighting * ao;
+  // Adjust based on height - base is darker, tip is brighter
+  float ao = mix(aoForDensity, 1.0, easeIn(vHeightPercent, 2.0));
+  
+  // Mix in the ambient occlusion term.
+  ambientLighting *= ao;
+  
+  // Apply lighting to gradient color - the blended normals create the rounded appearance
+  vec3 color = vColor * ambientLighting;
   
   gl_FragColor = vec4(color, 1.0);
 }
@@ -344,8 +394,8 @@ export default function Grass({
 
     // Create offset positions for each grass blade
     const offsets = [];
-    const NUM_GRASS_X = 32;
-    const NUM_GRASS_Y = 32;
+    const NUM_GRASS_X = 64;
+    const NUM_GRASS_Y = 64;
 
     for (let i = 0; i < NUM_GRASS_X; ++i) {
       const x = (i / NUM_GRASS_X) * GRASS_PATCH_SIZE - GRASS_PATCH_SIZE * 0.5;
@@ -398,6 +448,9 @@ export default function Grass({
           time: { value: 0 },
           grassSize: { value: new THREE.Vector2(0.08, 0.4) }, // Width: 0.08 (was 0.02 - too thin), Height: 0.4
           showNormals: { value: showNormals }, // Debug: toggle to visualize normals
+          terrainNormalBlendStart: { value: 10.0 }, // Distance where normal blending starts
+          terrainNormalBlendEnd: { value: 50.0 }, // Distance where normal blending ends
+          density: { value: 1.0 }, // Density in range [0, 1] - 0 = no grass, 1 = full grass
         }}
         side={THREE.DoubleSide}
       />

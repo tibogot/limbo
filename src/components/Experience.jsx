@@ -60,6 +60,7 @@ const maps = {
 
 export const Experience = () => {
   const shadowCameraRef = useRef();
+  const directionalLightRef = useRef();
   const [terrainReady, setTerrainReady] = useState(false);
   const playerPositionRef = useRef([0, 0, 0]);
   const [playerPosition, setPlayerPosition] = useState([0, 0, 0]);
@@ -80,6 +81,60 @@ export const Experience = () => {
     showPhysicsDebug: {
       value: false,
       label: "Show Physics Debug",
+    },
+  });
+
+  // Global Lights controls
+  const directionalLightControls = useControls("Global Lights - Directional", {
+    intensity: {
+      value: 0.65,
+      min: 0,
+      max: 5,
+      step: 0.05,
+      label: "Intensity",
+    },
+    positionX: {
+      value: -15,
+      min: -100,
+      max: 100,
+      step: 1,
+      label: "Position X",
+    },
+    positionY: {
+      value: 10,
+      min: -100,
+      max: 100,
+      step: 1,
+      label: "Position Y",
+    },
+    positionZ: {
+      value: 15,
+      min: -100,
+      max: 100,
+      step: 1,
+      label: "Position Z",
+    },
+    color: {
+      value: "#ffffff",
+      label: "Color",
+    },
+    castShadow: {
+      value: true,
+      label: "Cast Shadow",
+    },
+  });
+
+  const ambientLightControls = useControls("Global Lights - Ambient", {
+    intensity: {
+      value: 0.5,
+      min: 0,
+      max: 2,
+      step: 0.05,
+      label: "Intensity",
+    },
+    color: {
+      value: "#ffffff",
+      label: "Color",
     },
   });
 
@@ -229,9 +284,15 @@ export const Experience = () => {
       )}
       <Environment preset="sunset" />
       <directionalLight
-        intensity={0.65}
-        castShadow
-        position={[-15, 10, 15]}
+        ref={directionalLightRef}
+        intensity={directionalLightControls.intensity}
+        castShadow={directionalLightControls.castShadow}
+        position={[
+          directionalLightControls.positionX,
+          directionalLightControls.positionY,
+          directionalLightControls.positionZ,
+        ]}
+        color={directionalLightControls.color}
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
         shadow-bias={-0.00005}
@@ -245,6 +306,10 @@ export const Experience = () => {
           attach={"shadow-camera"}
         />
       </directionalLight>
+      <ambientLight
+        intensity={ambientLightControls.intensity}
+        color={ambientLightControls.color}
+      />
       <Physics
         key={map}
         debug={showPhysicsDebug}
