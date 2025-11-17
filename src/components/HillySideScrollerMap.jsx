@@ -17,6 +17,8 @@ import GrassFromScratch from "./GrassFromScratch";
 import { useGrassFromScratchControls } from "./useGrassFromScratchControls";
 import GFS2 from "./GFS2";
 import { useGFS2Controls } from "./useGFS2Controls";
+import ClaudeGrassQuick5 from "./ClaudeGrassQuick5";
+import useClaudeGrassQuick5Controls from "./useClaudeGrassQuick5Controls";
 
 export const HillySideScrollerMap = ({
   playerPosition = [0, 0, 0],
@@ -32,6 +34,20 @@ export const HillySideScrollerMap = ({
   const grassFromScratchControls = useGrassFromScratchControls();
   // Get GFS2 controls
   const gfs2Controls = useGFS2Controls();
+  // Get ClaudeGrassQuick5 controls
+  const claudeGrassQuick5Controls = useClaudeGrassQuick5Controls();
+
+  // Debug: Log controls to verify structure
+  useEffect(() => {
+    if (claudeGrassQuick5Controls) {
+      console.log("🌿 ClaudeGrassQuick5 Controls:", claudeGrassQuick5Controls);
+      console.log(
+        "🌿 Enabled:",
+        claudeGrassQuick5Controls?.claudeGrassQuick5?.enabled
+      );
+    }
+  }, [claudeGrassQuick5Controls]);
+
   const groundRef = useRef();
   const playerPosRef = useRef(new THREE.Vector3(...playerPosition));
   const [terrainReady, setTerrainReady] = useState(false);
@@ -749,6 +765,196 @@ export const HillySideScrollerMap = ({
             }
           />
         )}
+
+      {/* ClaudeGrassQuick5 component - only render when enabled */}
+      {(claudeGrassQuick5Controls?.claudeGrassQuick5?.enabled ||
+        claudeGrassQuick5Controls?.enabled) && (
+        <>
+          {console.log("🌿 Rendering ClaudeGrassQuick5")}
+          <ClaudeGrassQuick5
+            playerPosition={playerPosRef.current}
+            terrainSize={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.terrainSize ?? 500
+            }
+            heightScale={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.heightScale ?? 1
+            }
+            heightOffset={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.heightOffset ?? 0
+            }
+            grassWidth={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.grassWidth ?? 0.1
+            }
+            grassHeight={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.grassHeight ?? 0.8
+            }
+            lodDistance={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.lodDistance ?? 15
+            }
+            maxDistance={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.maxDistance ?? 100
+            }
+            patchSize={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.patchSize ?? 10
+            }
+            gridSize={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.gridSize ?? 16
+            }
+            patchSpacing={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.patchSpacing ?? 10
+            }
+            windEnabled={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.wind?.windEnabled ??
+              true
+            }
+            windStrength={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.wind
+                ?.windStrength ?? 1.25
+            }
+            windDirectionScale={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.wind
+                ?.windDirectionScale ?? 0.05
+            }
+            windDirectionSpeed={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.wind
+                ?.windDirectionSpeed ?? 0.05
+            }
+            windStrengthScale={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.wind
+                ?.windStrengthScale ?? 0.25
+            }
+            windStrengthSpeed={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.wind
+                ?.windStrengthSpeed ?? 1.0
+            }
+            playerInteractionEnabled={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.playerInteraction
+                ?.playerInteractionEnabled ?? true
+            }
+            playerInteractionRepel={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.playerInteraction
+                ?.playerInteractionRepel ?? true
+            }
+            playerInteractionRange={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.playerInteraction
+                ?.playerInteractionRange ?? 2.5
+            }
+            playerInteractionStrength={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.playerInteraction
+                ?.playerInteractionStrength ?? 0.2
+            }
+            playerInteractionHeightThreshold={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.playerInteraction
+                ?.playerInteractionHeightThreshold ?? 3.0
+            }
+            baseColor1={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.colors
+                ?.baseColor1 ?? "#051303"
+            }
+            baseColor2={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.colors
+                ?.baseColor2 ?? "#061a03"
+            }
+            tipColor1={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.colors?.tipColor1 ??
+              "#a6cc40"
+            }
+            tipColor2={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.colors?.tipColor2 ??
+              "#cce666"
+            }
+            gradientCurve={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.colors
+                ?.gradientCurve ?? 4.0
+            }
+            aoEnabled={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.advanced
+                ?.aoEnabled ?? true
+            }
+            aoIntensity={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.advanced
+                ?.aoIntensity ?? 1.0
+            }
+            grassMiddleBrightnessMin={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.advanced
+                ?.grassMiddleBrightnessMin ?? 0.85
+            }
+            grassMiddleBrightnessMax={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.advanced
+                ?.grassMiddleBrightnessMax ?? 1.0
+            }
+            fogEnabled={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.fog?.fogEnabled ??
+              false
+            }
+            fogNear={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.fog?.fogNear ?? 5.0
+            }
+            fogFar={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.fog?.fogFar ?? 50.0
+            }
+            fogIntensity={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.fog?.fogIntensity ??
+              1.0
+            }
+            fogColor={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.fog?.fogColor ??
+              "#4f74af"
+            }
+            specularEnabled={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.specular
+                ?.specularEnabled ?? false
+            }
+            specularIntensity={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.specular
+                ?.specularIntensity ?? 2.0
+            }
+            specularColor={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.specular
+                ?.specularColor ?? "#ffffff"
+            }
+            specularDirectionX={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.specular
+                ?.specularDirectionX ?? -1.0
+            }
+            specularDirectionY={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.specular
+                ?.specularDirectionY ?? 1.0
+            }
+            specularDirectionZ={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.specular
+                ?.specularDirectionZ ?? 0.5
+            }
+            backscatterEnabled={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.backscatter
+                ?.backscatterEnabled ?? true
+            }
+            backscatterIntensity={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.backscatter
+                ?.backscatterIntensity ?? 0.5
+            }
+            backscatterColor={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.backscatter
+                ?.backscatterColor ?? "#51cc66"
+            }
+            backscatterPower={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.backscatter
+                ?.backscatterPower ?? 2.0
+            }
+            frontScatterStrength={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.backscatter
+                ?.frontScatterStrength ?? 0.3
+            }
+            rimSSSStrength={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.backscatter
+                ?.rimSSSStrength ?? 0.5
+            }
+            grassDensity={
+              claudeGrassQuick5Controls?.claudeGrassQuick5?.grassDensity ?? 3072
+            }
+          />
+        </>
+      )}
     </group>
   );
 };

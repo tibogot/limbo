@@ -1,11 +1,11 @@
 import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import { acceleratedRaycast } from "three-mesh-bvh";
 
-const GRASS_BLADES = 9216; // 96x96 = 9,216 blades (increased from 64x64 = 4,096 for denser grass)
-const GRASS_SEGMENTS = 6; // Number of segments in the blade
-const GRASS_VERTICES = (GRASS_SEGMENTS + 1) * 2; // Vertices per blade (front and back)
-const GRASS_PATCH_SIZE = 10;
+const GRASS_BLADES = 4096; // Good density (64x64 = 4096)
+const GRASS_BLADE_VERTICES = 15; // Matches tutorial exactly
+const GRASS_PATCH_SIZE = 5; // Reduced patch size for higher density
 
 // Helper function to generate random number in range
 function randRange(min, max) {
@@ -22,8 +22,7 @@ varying vec3 vViewPosition;
 varying vec3 vUpVectorViewSpace; // Up vector transformed to view space
 
 attribute float vertIndex;
-attribute vec3 instancePosition; // Instanced attribute for grass blade position (uint16, half float encoded)
-// Note: Can't use 'position' - it's reserved by Three.js, so we use 'instancePosition'
+attribute vec3 instancePosition; // Instanced attribute for grass blade position (can't use 'position' - it's reserved in Three.js)
 
 uniform float time;
 uniform vec2 grassSize;
@@ -79,6 +78,25 @@ vec2 hash12(vec2 p) {
   return fract((p3.xx + p3.yz) * p3.zy);
 }
 
+// 2D noise function (noise12: 1D output from 2D input) - for grass animation
+// Simplified version using hash directly with smooth interpolation
+float noise12(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  
+  // Smoothstep for smooth interpolation
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  
+  // Get hash values for the four corners
+  float a = hash12(i).x;
+  float b = hash12(i + vec2(1.0, 0.0)).x;
+  float c = hash12(i + vec2(0.0, 1.0)).x;
+  float d = hash12(i + vec2(1.0, 1.0)).x;
+  
+  // Bilinear interpolation
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 // Rotation matrix around X axis - matches tutorial
 mat3 rotateX(float theta) {
   float c = cos(theta);
@@ -99,6 +117,11 @@ mat3 rotateY(float theta) {
     0.0, 1.0, 0.0,
     -s, 0.0, c
   );
+}
+
+// Remap function - maps value from one range to another
+float remap(float value, float inMin, float inMax, float outMin, float outMax) {
+  return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
 }
 
 // Ease out function for smooth thickening curve
@@ -127,35 +150,42 @@ void main() {
   float randomHeight = mix(0.75, 1.5, hash1.x);
   float randomLean = mix(0.3, 0.7, hash2.x); // Increased from 0.1-0.4 to 0.3-0.7 for more visible curve
   
-  float GRASS_SEGMENTS_F = ${GRASS_SEGMENTS}.0;
-  float GRASS_VERTICES_F = ${GRASS_VERTICES}.0;
+  float GRASS_BLADE_VERTICES_F = ${GRASS_BLADE_VERTICES}.0;
   
-  // Figure out which vertex this is
-  float vertID = mod(vertIndex, GRASS_VERTICES_F);
+  // Figure out which vertex this is (matches tutorial)
+  // Assuming 7 segments with 2 vertices each = 14 vertices, structure may vary
+  // TODO: Need to see tutorial's vertex structure to match exactly
+  float vertID = vertIndex;
   
-  // Front or back side (-1 = back, 1 = front)
-  float zSide = -(floor(vertIndex / GRASS_VERTICES_F) * 2.0 - 1.0);
-  
-  // Left or right edge (0 = left, 1 = right)
-  float xSide = mod(vertID, 2.0);
-  
-  // Height percentage along blade (0 = base, 1 = tip)
-  float heightPercent = (vertID - xSide) / (GRASS_SEGMENTS_F * 2.0);
+  // Temporary structure - will update when we see tutorial's approach
+  // Assuming: 7 segments (0-6), each with left (even) and right (odd) vertices
+  float segmentID = floor(vertID / 2.0);
+  float xSide = mod(vertID, 2.0); // 0 = left, 1 = right
+  float heightPercent = segmentID / 6.0; // 0 to 1 along blade height
   
   // Calculate blade dimensions
   float grassHeight = grassSize.y * randomHeight;
   float grassWidth = grassSize.x * (1.0 - heightPercent); // Taper to tip
   
   // Position of this vertex
-  float x = (xSide - 0.5) * grassWidth;
-  float y = heightPercent * grassHeight;
+  // Blade is created in local space: x = width, y = height, z = 0
+  // The blade stands vertically, so base is at y=0, tip is at y=grassHeight
+  // IMPORTANT: The base vertex (heightPercent=0) must be at y=0 to stay on ground
+  float x = (xSide - 0.5) * grassWidth; // Width (left/right)
+  float y = heightPercent * grassHeight; // Height (up from base, 0 to grassHeight)
+  float z = 0.0; // Blade is flat (no depth)
+  
+  // Ensure base is exactly at y=0 (no floating point errors)
+  if (heightPercent < 0.001) {
+    y = 0.0;
+  }
   
   // Width percent (normalized position across blade width) - for normal blending
   float widthPercent = xSide; // 0 = left edge, 1 = right edge
   
   // Calculate grass vertex normal (before transformations)
   // For a vertical blade, the normal is perpendicular to the blade surface
-  // Before rotation, the blade is in the XY plane, so normal points in Z
+  // Before rotation, the blade is in the XY plane (vertical), so normal points in Z
   vec3 grassVertexNormal = vec3(0.0, 0.0, 1.0);
   
   // VERTEX SHADER: Create two rotated normals for blending (matches tutorial)
@@ -165,24 +195,74 @@ void main() {
   vec3 rotatedNormal1 = rotateY(PI * 0.3) * grassVertexNormal;
   vec3 rotatedNormal2 = rotateY(PI * -0.3) * grassVertexNormal;
   
+  // Wind effects - matches tutorial exactly
+  // Sample noise and then remap into the range [0, 2PI].
+  float windDir = noise12(grassBladeWorldPos.xz * 0.05 + 0.05 * time);
+  windDir = remap(windDir, 0.0, 1.0, -1.0, 1.0);
+  windDir = remap(windDir, -1.0, 1.0, 0.0, PI * 2.0);
+  
+  // Another noise sample for the strength of the wind.
+  float windNoiseSample = noise12(grassBladeWorldPos.xz * 0.25 + time);
+  
+  // Try and shape it a bit with easeIn(), this is pretty arbitrary.
+  windNoiseSample = remap(windNoiseSample, 0.0, 1.0, -1.0, 1.0);
+  float windLeanAngle = remap(windNoiseSample, -1.0, 1.0, 0.25, 1.0);
+  windLeanAngle = easeIn(windLeanAngle, 2.0) * 1.25;
+  
   // Apply curve/lean to blade - matches tutorial exactly!
   // Surprisingly, this works pretty ok
   float curveAmount = randomLean * heightPercent;
   
-  // Create a 3x3 rotation matrix around x
+  // Sample noise using time + world position.
+  float noiseSample = noise12(vec2(time * 0.35) + grassBladeWorldPos.xz);
+  
+  // Add the animated noise onto the grass curve.
+  curveAmount += noiseSample * 0.1;
+  
+  // Apply wind rotation - creates smooth bend from base, not hook
+  // Reduce wind strength and apply more subtly to avoid hook shape
+  float windBend = windLeanAngle * heightPercent * 0.15; // Reduced multiplier for smoother effect
+  
+  // Rotate around Y axis to orient in wind direction, then X axis for the bend
+  // This creates a smooth lean from base, not a hook
+  mat3 windRotY = rotateY(windDir);
+  mat3 windRotX = rotateX(windBend);
+  mat3 windMat = windRotY * windRotX;
+  
+  // Create a 3x3 rotation matrix around x (for forward/backward lean)
   mat3 grassMat = rotateX(curveAmount);
   
-  // Now generate the grass vertex position
-  vec3 grassVertexPosition = grassMat * vec3(x, y, 0.0);
+  // Combine rotations: apply wind first, then curve
+  // This creates a smooth bend from base with natural curve variation
+  mat3 combinedMat = grassMat * windMat;
   
-  // Apply Y rotation for blade orientation
+  // Now generate the grass vertex position in local space
+  // Blade is created: x = width, y = height (0 to grassHeight), z = 0
+  // The base is at (0, 0, 0), tip is at (0, grassHeight, 0)
+  vec3 localPosition = vec3(x, y, z);
+  
+  // Apply rotations to local position (rotations happen around origin/base)
+  vec3 rotatedPosition = combinedMat * localPosition;
+  
+  // Apply Y rotation for blade orientation (after wind and curve)
   mat3 rotY = mat3(
     cos(randomAngle), 0.0, sin(randomAngle),
     0.0, 1.0, 0.0,
     -sin(randomAngle), 0.0, cos(randomAngle)
   );
-  grassVertexPosition = rotY * grassVertexPosition;
-  grassVertexPosition += grassBladeWorldPos;
+  rotatedPosition = rotY * rotatedPosition;
+  
+  // Now add world position - this places the blade in world space
+  // The base (which should be at (0,0,0) after rotations) will be at grassBladeWorldPos
+  vec3 grassVertexPosition = rotatedPosition + grassBladeWorldPos;
+  
+  // CRITICAL: Ensure base vertex Y is exactly at terrain height
+  // After rotations, the base Y might have moved slightly, so we force it to the terrain height
+  // But we keep X and Z as they are (with blade width) to maintain the blade shape at the base
+  if (heightPercent < 0.001) {
+    // Base vertex: only force Y to terrain height, keep X and Z for blade width
+    grassVertexPosition.y = grassBladeWorldPos.y;
+  }
   
   // IMPORTANT: Normals are NOT transformed by other rotations!
   // They are rotated ONLY by rotateY(PI * 0.3) and rotateY(PI * -0.3)
@@ -210,9 +290,11 @@ void main() {
   vRotatedNormal2 = transformedNormal2;
   vWidthPercent = widthPercent;
   
-  // Final position in model space
-  vec4 modelPosition = modelMatrix * vec4(grassVertexPosition, 1.0);
-  vec4 mvPosition = viewMatrix * modelPosition;
+  // Final position - apply modelMatrix then viewMatrix
+  // The grassVertexPosition includes the world position, but we still need modelMatrix
+  // for the mesh's own transform (position, rotation, scale)
+  vec4 worldPos = vec4(grassVertexPosition, 1.0);
+  vec4 mvPosition = viewMatrix * modelMatrix * worldPos;
   
   // Pass view position for distance calculation in fragment shader
   vViewPosition = mvPosition.xyz;
@@ -301,6 +383,11 @@ void main() {
     return;
   }
   
+  // DEBUG: Test if time is updating - uncomment to see time as color (should pulse)
+  // Uncomment the next 2 lines to test if time is updating:
+  // float timeFrac = fract(time * 0.1);
+  // gl_FragColor = vec4(timeFrac, timeFrac, timeFrac, 1.0); return;
+  
   // Use the blended normal for lighting to create rounded 3D appearance
   // Normal is already in view space from vertex shader
   // Simple directional light in view space (from top, slightly forward)
@@ -341,12 +428,39 @@ export default function Grass({
   terrainOffset = -150,
   terrainHeight = 15,
   showNormals = false,
+  terrainMesh = null, // Terrain mesh for BVH raycasting
 }) {
   const materialRef = useRef();
 
   const geometry = useMemo(() => {
-    // Function to sample height from heightData
-    const getHeightAt = (worldX, worldZ) => {
+    // Function to get height using BVH raycasting (preferred method)
+    const getHeightAtBVH = (worldX, worldZ) => {
+      if (!terrainMesh) return 0;
+
+      // Enable accelerated raycasting if not already enabled
+      if (!THREE.Mesh.prototype.raycast.isAcceleratedRaycast) {
+        THREE.Mesh.prototype.raycast = acceleratedRaycast;
+      }
+
+      const raycaster = new THREE.Raycaster();
+      const rayOrigin = new THREE.Vector3(worldX, 100, worldZ); // Start high above
+      const rayDirection = new THREE.Vector3(0, -1, 0); // Cast downward
+
+      raycaster.set(rayOrigin, rayDirection);
+      raycaster.firstHitOnly = true;
+
+      const intersects = raycaster.intersectObject(terrainMesh, false);
+
+      if (intersects.length > 0) {
+        return intersects[0].point.y;
+      }
+
+      // Fallback to heightData if BVH fails
+      return getHeightAtHeightData(worldX, worldZ);
+    };
+
+    // Fallback function to sample height from heightData
+    const getHeightAtHeightData = (worldX, worldZ) => {
       if (!heightData) return 0;
       const size = terrainSize;
       const segments = terrainSegments;
@@ -372,67 +486,85 @@ export default function Grass({
       const h1 = h01 * (1 - fx) + h11 * fx;
       return h0 * (1 - fz) + h1 * fz;
     };
-    // Create vertex ID array - each vertex gets an ID
-    const vertID = new Uint8Array(GRASS_VERTICES * 2); // *2 for front and back
-    for (let i = 0; i < GRASS_VERTICES * 2; ++i) {
-      vertID[i] = i;
-    }
 
-    // Create indices for triangles
-    const indices = [];
-    for (let i = 0; i < GRASS_SEGMENTS; ++i) {
-      const vi = i * 2;
-      // Front face triangles
-      indices.push(vi + 0, vi + 1, vi + 2);
-      indices.push(vi + 2, vi + 1, vi + 3);
-
-      // Back face triangles (reversed winding)
-      const fi = GRASS_VERTICES + vi;
-      indices.push(fi + 2, fi + 1, fi + 0);
-      indices.push(fi + 3, fi + 1, fi + 2);
-    }
-
-    // Create offset positions for each grass blade
+    // Use BVH if terrainMesh is available, otherwise fallback to heightData
+    const getHeightAt = terrainMesh ? getHeightAtBVH : getHeightAtHeightData;
+    // Create offset positions for each grass blade - matches tutorial exactly
     const offsets = [];
-    const NUM_GRASS_X = 96;
-    const NUM_GRASS_Y = 96;
+    const NUM_GRASS_X = 64; // 64x64 = 4096 blades (good density)
+    const NUM_GRASS_Y = 64;
 
     for (let i = 0; i < NUM_GRASS_X; ++i) {
-      const x = (i / NUM_GRASS_X) * GRASS_PATCH_SIZE - GRASS_PATCH_SIZE * 0.5;
-      for (let j = 0; j < NUM_GRASS_Y; ++j) {
-        const z = (j / NUM_GRASS_Y) * GRASS_PATCH_SIZE - GRASS_PATCH_SIZE * 0.5;
-        const posX = x + randRange(-0.2, 0.2);
-        const posZ = z + randRange(-0.2, 0.2);
-        const posY = getHeightAt(posX, posZ); // Sample terrain height
-        offsets.push(posX, posY, posZ);
+      const x = i / NUM_GRASS_Y - 0.5; // Matches tutorial: (i / NUM_GRASS_Y) - 0.5
+      for (let j = 0; j < NUM_GRASS_X; ++j) {
+        const z = j / NUM_GRASS_Y - 0.5; // Matches tutorial: (j / NUM_GRASS_Y) - 0.5 (this is Z in world space)
+        const worldX = x * GRASS_PATCH_SIZE + randRange(-0.2, 0.2);
+        const worldZ = z * GRASS_PATCH_SIZE + randRange(-0.2, 0.2);
+        const worldY = getHeightAt(worldX, worldZ); // Calculate height using BVH or heightData
+        offsets.push(worldX); // X position
+        offsets.push(worldY); // Y position (calculated from terrain)
+        offsets.push(worldZ); // Z position
       }
     }
 
-    // Use Float16 (half precision) for better performance - matches tutorial exactly!
-    // THREE.DataUtils.toHalfFloat() exists - use it directly (matches tutorial!)
+    // Convert to half float - matches tutorial exactly
     const offsetsData = offsets.map(THREE.DataUtils.toHalfFloat);
 
-    // Create instanced attribute with Float16 data
-    // Note: Tutorial uses InstancedFloat16BufferAttribute, but Three.js uses
-    // InstancedBufferAttribute with Uint16Array (from toHalfFloat)
-    const instancedOffsetAttribute = new THREE.InstancedBufferAttribute(
-      new Uint16Array(offsetsData),
-      3
-    );
+    // Create vertID array - matches tutorial exactly
+    const vertID = new Uint8Array(GRASS_BLADE_VERTICES);
+    for (let i = 0; i < GRASS_BLADE_VERTICES; ++i) {
+      vertID[i] = i;
+    }
 
-    // Create geometry
+    // Create index buffer - temporary until we see tutorial's CreateIndexBuffer()
+    // Assuming 7 segments (0-6) with 2 vertices each = 14 vertices, plus 1 tip = 15
+    // Create triangles for each segment
+    const indices = [];
+    for (let i = 0; i < 6; ++i) {
+      const vi = i * 2; // Base vertex index for this segment
+      // Front face triangles
+      indices.push(vi + 0, vi + 1, vi + 2);
+      indices.push(vi + 2, vi + 1, vi + 3);
+    }
+    // Add tip triangle if needed
+    if (GRASS_BLADE_VERTICES >= 14) {
+      indices.push(12, 13, 14); // Tip triangle
+    }
+
+    // Create geometry - matches tutorial exactly
     const geo = new THREE.InstancedBufferGeometry();
-
+    geo.instanceCount = GRASS_BLADES; // Matches tutorial
     geo.setAttribute("vertIndex", new THREE.Uint8BufferAttribute(vertID, 1));
-    // Set instancePosition attribute using Float16 data - matches tutorial pattern
-    geo.setAttribute("instancePosition", instancedOffsetAttribute);
+    // Note: Tutorial uses InstancedFloat16BufferAttribute, but Three.js r180 uses InstancedBufferAttribute
+    // Note: Can't use 'position' as attribute name - it's reserved in Three.js
+    // Using 'instancePosition' instead, but functionality matches tutorial
+    geo.setAttribute(
+      "instancePosition",
+      new THREE.InstancedBufferAttribute(new Uint16Array(offsetsData), 3)
+    );
+    // Set index buffer - temporary until we see tutorial's CreateIndexBuffer()
     geo.setIndex(new THREE.BufferAttribute(new Uint16Array(indices), 1));
 
     return geo;
-  }, [heightData, terrainSize, terrainSegments, terrainOffset]);
+  }, [heightData, terrainSize, terrainSegments, terrainOffset, terrainMesh]);
+
+  // Memoize uniforms - only create once, update values via ref in useFrame
+  const uniforms = useMemo(
+    () => ({
+      time: { value: 0 }, // Initial value, will be updated via ref
+      grassSize: { value: new THREE.Vector2(0.04, 0.25) }, // Width: 0.04 (reduced from 0.05), Height: 0.25
+      showNormals: { value: showNormals },
+      terrainNormalBlendStart: { value: 10.0 },
+      terrainNormalBlendEnd: { value: 50.0 },
+      density: { value: 1.0 },
+    }),
+    [showNormals] // Only recreate if showNormals changes
+  );
 
   useFrame((state) => {
-    if (materialRef.current) {
+    // CRITICAL: Update uniforms directly via ref every frame
+    // This is the only way to ensure time updates in the shader
+    if (materialRef.current && materialRef.current.uniforms) {
       materialRef.current.uniforms.time.value = state.clock.elapsedTime;
       materialRef.current.uniforms.showNormals.value = showNormals;
     }
@@ -444,14 +576,7 @@ export default function Grass({
         ref={materialRef}
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
-        uniforms={{
-          time: { value: 0 },
-          grassSize: { value: new THREE.Vector2(0.08, 0.4) }, // Width: 0.08 (was 0.02 - too thin), Height: 0.4
-          showNormals: { value: showNormals }, // Debug: toggle to visualize normals
-          terrainNormalBlendStart: { value: 10.0 }, // Distance where normal blending starts
-          terrainNormalBlendEnd: { value: 50.0 }, // Distance where normal blending ends
-          density: { value: 1.0 }, // Density in range [0, 1] - 0 = no grass, 1 = full grass
-        }}
+        uniforms={uniforms}
         side={THREE.DoubleSide}
       />
     </instancedMesh>
