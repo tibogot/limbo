@@ -13,7 +13,6 @@ import { HillySideScrollerMap } from "./HillySideScrollerMap";
 import { Map } from "./Map";
 import { ProceduralTerrain } from "./ProceduralTerrain";
 import { SideScrollerMap } from "./SideScrollerMap";
-import useClaudeGrassQuick3Controls from "./useClaudeGrassQuick3Controls";
 
 const maps = {
   castle_on_hills: {
@@ -137,9 +136,6 @@ export const Experience = () => {
       label: "Color",
     },
   });
-
-  // Get grass controls
-  const grassControls = useClaudeGrassQuick3Controls();
 
   // HeightFog controls
   const fogControls = useControls("Height Fog", {
@@ -326,14 +322,12 @@ export const Experience = () => {
             scale={maps[map].scale}
             position={maps[map].position}
             playerPosition={playerPosition}
-            grassControls={grassControls}
           />
         ) : maps[map].type === "hillysidescroller" ? (
           <HillySideScrollerMap
             scale={maps[map].scale}
             position={maps[map].position}
             playerPosition={playerPosition}
-            grassControls={grassControls}
             onTerrainReady={(heightFn) => {
               terrainHeightFunctionRef.current = heightFn;
             }}
